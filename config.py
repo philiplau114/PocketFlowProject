@@ -1,0 +1,55 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Database
+SQLALCHEMY_DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URL')
+MYSQL_HOST = os.getenv('MYSQL_HOST')
+MYSQL_PORT = int(os.getenv('MYSQL_PORT', 3306)) if os.getenv('MYSQL_PORT') else None
+MYSQL_USER = os.getenv('MYSQL_USER')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
+MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
+
+AGENT_DB_PATH = os.getenv('AGENT_DB_PATH')
+
+# Redis
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+REDIS_QUEUE = os.getenv('REDIS_QUEUE', 'pfai_tasks')
+
+# Watch folder for input .set files
+SET_FILE_LIBRARY = os.getenv('SET_FILE_LIBRARY')
+WATCH_FOLDER = os.path.join(SET_FILE_LIBRARY, '01_user_inputs') if SET_FILE_LIBRARY else None
+
+# Symbol list for .set file parsing
+SYMBOL_CSV_PATH = os.getenv('SYMBOL_CSV_PATH', os.path.join(SET_FILE_LIBRARY or '', 'SymbolList.csv'))
+MT4_OPTIMIZER_PATH = os.getenv('MT4_OPTIMIZER_PATH')
+
+# Worker/Controller/User
+USER_ID = os.getenv('USER_ID', 'system')
+WORKER_ID = os.getenv('WORKER_ID', 'worker_1')
+
+# UiPath or workflow runner (for worker)
+UIPATH_CLI = os.getenv('UIPATH_CLI')
+UIPATH_WORKFLOW = os.getenv('UIPATH_WORKFLOW')
+
+# Logging
+LOG_DIR = os.getenv('LOG_DIR', 'logs')
+
+# Supervisor polling intervals and thresholds (in minutes)
+JOB_STUCK_THRESHOLD_MINUTES = int(os.getenv('JOB_STUCK_THRESHOLD_MINUTES', 60))
+WORKER_INACTIVE_THRESHOLD_MINUTES = int(os.getenv('WORKER_INACTIVE_THRESHOLD_MINUTES', 5))
+SUPERVISOR_POLL_INTERVAL = int(os.getenv('SUPERVISOR_POLL_INTERVAL', 60))
+
+# Email notification
+SMTP_SERVER = os.getenv('SMTP_SERVER')
+SMTP_PORT = int(os.getenv('SMTP_PORT', 587))
+SMTP_USER = os.getenv('SMTP_USER')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
+EMAIL_FROM = os.getenv('EMAIL_FROM')
+EMAIL_TO = os.getenv('EMAIL_TO')
+
+# Telegram notification
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
