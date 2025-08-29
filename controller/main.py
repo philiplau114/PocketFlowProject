@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from db_utils import extract_setfile_metadata, insert_job_and_task, get_db
 from config import WATCH_FOLDER, REDIS_HOST, REDIS_PORT, REDIS_QUEUE, USER_ID
+from notify import send_email, send_telegram
 
 logging.basicConfig(level=logging.INFO)
 
@@ -26,13 +27,18 @@ def main():
                     "ea_name": meta.get("ea_name"),
                     "symbol": meta.get("symbol"),
                     "timeframe": meta.get("timeframe"),
-                    # Optionally add more extracted fields here if needed
                 }
                 r.lpush(REDIS_QUEUE, json.dumps(task_data))
                 processed_files.add(file.name)
                 logging.info("Queued new task: %s", file.name)
             except Exception as e:
-                logging.error("Failed to process file %s: %s", file.name, e)
+                error_msg = f"Failed to process file {file.name}: {e}"
+                logging.error(error_msg)
+                # Notification for task file processing failure
+                subject = f"Task File Processing Failed: {file.name}"
+                body = f"{error_msg}\n\nPlease check the file and system logs."
+                send_email(subject, body)
+                send_telegram(body)
         time.sleep(10)
 
 if __name__ == "__main__":

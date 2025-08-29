@@ -42,6 +42,7 @@ class ControllerTask(Base):
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_heartbeat = Column(DateTime, nullable=True)  # <--- Added
     attempt_count = Column(Integer)
     max_attempts = Column(Integer)
     worker_job_id = Column(Integer)  # Add this line

@@ -4,11 +4,13 @@ import json
 import logging
 import redis
 import subprocess
-from db_utils import update_task_status, create_attempt, finish_attempt, get_db
-from db_sync import sync_test_metrics, sync_trade_records, sync_artifacts, sync_ai_suggestions
+from datetime import datetime
 
-# NEW: Import the new utility for updating worker_job_id
-from db_utils import update_task_worker_job
+from db_utils import (
+    update_task_status, create_attempt, finish_attempt, get_db,
+    update_task_worker_job, update_task_heartbeat  # <--- Import heartbeat util
+)
+from db_sync import sync_test_metrics, sync_trade_records, sync_artifacts, sync_ai_suggestions
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
@@ -56,6 +58,7 @@ def parse_uipath_output(stdout):
 
 def main():
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    HEARTBEAT_INTERVAL = 300  # seconds (5 min)
     while True:
         try:
             task_json = r.rpop(REDIS_QUEUE)
@@ -71,29 +74,65 @@ def main():
 
             with get_db() as session:
                 update_task_status(session, task_id, "in_progress", assigned_worker=WORKER_ID)
+                # Initial heartbeat update
+                update_task_heartbeat(session, task_id)
                 attempt_id = create_attempt(session, task_id, status="in_progress")
 
             try:
-                result = run_uipath(set_file, job_id, task_id)
-                uipath_outputs = parse_uipath_output(result.stdout) if result.returncode == 0 else {}
-
-                # Extract output arguments
+                # Heartbeat/progress update loop
+                start_time = time.time()
+                last_heartbeat = start_time
+                result = None
+                uipath_outputs = {}
+                # Launch the process and poll:
+                process = subprocess.Popen(
+                    [
+                        UIROBOT_PATH,
+                        "execute",
+                        "--file", PACKAGE_PATH,
+                        "--input", json.dumps({
+                            "in_JobId": str(job_id),
+                            "in_TaskId": str(task_id),
+                            "in_InputSetFilePath": set_file
+                        })
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                while True:
+                    # Heartbeat update every HEARTBEAT_INTERVAL seconds
+                    now = time.time()
+                    if now - last_heartbeat > HEARTBEAT_INTERVAL:
+                        with get_db() as session:
+                            update_task_heartbeat(session, task_id)
+                        last_heartbeat = now
+                    # Poll if process finished
+                    if process.poll() is not None:
+                        break
+                    time.sleep(5)
+                # Process finished, collect results
+                stdout, stderr = process.communicate()
+                returncode = process.returncode
+                if returncode == 0:
+                    uipath_outputs = parse_uipath_output(stdout)
+                else:
+                    uipath_outputs = {}
                 out_worker_JobId = uipath_outputs.get("out_worker_JobId")
-                out_Status = uipath_outputs.get("out_Status", "Failed" if result.returncode != 0 else "Completed")
+                out_Status = uipath_outputs.get("out_Status", "Failed" if returncode != 0 else "Completed")
                 out_Artifacts = uipath_outputs.get("out_Artifacts")
-                out_ErrorMessage = uipath_outputs.get("out_ErrorMessage", result.stderr if result.returncode != 0 else None)
+                out_ErrorMessage = uipath_outputs.get("out_ErrorMessage", stderr if returncode != 0 else None)
 
                 status = "completed" if out_Status.lower() == "completed" else "failed"
                 error_message = out_ErrorMessage
                 result_json = json.dumps({
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
+                    "stdout": stdout,
+                    "stderr": stderr,
                     "out_worker_JobId": out_worker_JobId,
                     "out_Status": out_Status,
                     "out_Artifacts": out_Artifacts,
                     "out_ErrorMessage": out_ErrorMessage
                 })
-
             except Exception as e:
                 status = "failed"
                 error_message = str(e)
@@ -102,8 +141,8 @@ def main():
 
             with get_db() as session:
                 update_task_status(session, task_id, status)
+                update_task_heartbeat(session, task_id)  # Final heartbeat on finish
                 finish_attempt(session, attempt_id, status, error_message, result_json)
-                # NEW: Update worker_job_id in the controller_tasks table if available
                 if out_worker_JobId:
                     try:
                         update_task_worker_job(session, task_id, int(out_worker_JobId))

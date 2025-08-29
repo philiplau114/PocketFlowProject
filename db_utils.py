@@ -106,6 +106,12 @@ def finish_attempt(session, attempt_id, status, error_message=None, result_json=
         attempt.result_json = result_json
         session.commit()
 
+def update_task_heartbeat(session, task_id):
+    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).first()
+    if task:
+        task.last_heartbeat = datetime.utcnow()
+        session.commit()
+
 def get_stuck_tasks(session, threshold_minutes=60):
     cutoff = datetime.utcnow() - timedelta(minutes=threshold_minutes)
     return session.query(ControllerTask).filter(
