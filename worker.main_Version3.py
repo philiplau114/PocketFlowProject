@@ -24,9 +24,6 @@ UIROBOT_PATH = os.getenv('UIPATH_CLI', r"C:\Users\Philip\AppData\Local\Programs\
 PACKAGE_PATH = os.getenv('UIPATH_WORKFLOW', r"C:\Users\Philip\Documents\UiPath\Packages\MT4.Backtesting.Automation.1.0.1-alpha.2.nupkg")
 MAX_EXEC_SECONDS = int(os.getenv('UIPATH_JOB_MAX_SECONDS', 12 * 3600))  # default 12 hours
 KILL_SIGNAL_FILE = os.getenv('UIPATH_KILL_FILE', 'kill_worker.txt')     # kill file path
-OUTPUT_JSON_DIR = os.getenv('UIPATH_OUTPUT_DIR', tempfile.gettempdir())
-OUTPUT_JSON_POLL_INTERVAL = int(os.getenv('UIPATH_OUTPUT_POLL_INTERVAL', 5))  # 5 seconds
-OUTPUT_JSON_WARNING_MODULUS = int(os.getenv('UIPATH_OUTPUT_WARNING_MODULUS', 150))  # warnings every N unreadable polls
 
 logging.basicConfig(level=logging.INFO)
 
@@ -65,9 +62,9 @@ def main():
                 last_heartbeat = start_time
 
                 # Generate a unique output JSON path
-                #tmp_dir = tempfile.gettempdir()
+                tmp_dir = tempfile.gettempdir()
                 output_json_path = os.path.join(
-                    OUTPUT_JSON_DIR,
+                    tmp_dir,
                     f"uipath_output_{job_id}_{task_id}_{int(time.time())}.json"
                 )
 
@@ -147,9 +144,9 @@ def main():
                             logging.info(f"Output JSON ready for task {task_id}: {uipath_outputs}")
                         except Exception as e:
                             file_parse_attempts += 1
-                            if file_parse_attempts % OUTPUT_JSON_WARNING_MODULUS == 0:
+                            if file_parse_attempts % 5 == 0:
                                 logging.warning(f"Unreadable output JSON for task {task_id} (attempt {file_parse_attempts}): {e}")
-                            time.sleep(OUTPUT_JSON_POLL_INTERVAL)
+                            time.sleep(2)
                             continue
 
                     if json_ready:
@@ -218,28 +215,4 @@ def main():
             status = "completed" if (out_Status and out_Status.lower() == "completed") else "failed"
             with get_db() as session:
                 update_task_status(session, task_id, status)
-                update_task_heartbeat(session, task_id)
-                finish_attempt(session, attempt_id, status, error_message, result_json_blob)
-                if out_worker_JobId:
-                    try:
-                        update_task_worker_job(session, task_id, int(out_worker_JobId))
-                        logging.info(f"Updated worker_job_id={out_worker_JobId} for controller task {task_id}")
-                    except Exception as e:
-                        logging.warning(f"Failed to update worker_job_id for task {task_id}: {e}")
-
-            if status == "completed" and out_worker_JobId:
-                try:
-                    sync_test_metrics(out_worker_JobId)
-                    sync_trade_records(out_worker_JobId)
-                    sync_artifacts(out_worker_JobId)
-                    sync_ai_suggestions(out_worker_JobId)
-                    logging.info(f"Synchronized all databases for worker_job_id={out_worker_JobId}")
-                except Exception as e:
-                    logging.error(f"Error during DB sync for worker_job_id={out_worker_JobId}: {e}")
-
-        except Exception as e:
-            logging.error("Worker loop error: %s", e)
-            time.sleep(5)
-
-if __name__ == "__main__":
-    main()
+                update_task_heartbeat

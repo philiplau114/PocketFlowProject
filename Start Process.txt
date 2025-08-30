@@ -1,0 +1,8 @@
+
+cd C:\Users\Philip\Documents\GitHub\PocketFlowProject
+.\venv\Scripts\activate 
+python -m controller.main
+
+python -m supervisor.supervisor
+
+python -m worker.main

@@ -39,6 +39,18 @@ def extract_setfile_metadata(setfile_path):
     }
 
 def insert_job_and_task(session, meta, set_file_path, user_id="system"):
+    # Deduplicate by checking for an existing job for this file
+    existing_job = session.query(ControllerJob).filter_by(
+        original_file=set_file_path
+    ).first()
+    if existing_job:
+        existing_task = session.query(ControllerTask).filter_by(
+            job_id=existing_job.id,
+            file_path=set_file_path
+        ).first()
+        # Return IDs and a flag indicating not new
+        return existing_job.id, existing_task.id if existing_task else None, False
+
     job = ControllerJob(
         user_id=user_id,
         job_type="optimization",
@@ -65,7 +77,8 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
     )
     session.add(task)
     session.commit()
-    return job.id, task.id
+    # Return IDs and a flag indicating it's new
+    return job.id, task.id, True
 
 def update_task_status(session, task_id, status, assigned_worker=None):
     task = session.query(ControllerTask).filter(ControllerTask.id == task_id).first()
