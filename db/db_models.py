@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Float, LargeBinary
+    Column, Integer, String, Text, DateTime, ForeignKey, Float, LargeBinary, BLOB
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -34,18 +34,25 @@ class ControllerTask(Base):
     __tablename__ = 'controller_tasks'
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(Integer, ForeignKey('controller_jobs.id'))
+    parent_task_id = Column(Integer, ForeignKey('controller_tasks.id'), nullable=True)  # NEW: fine-tune/retry lineage
     step_number = Column(Integer)
     step_name = Column(String(255))
     status = Column(String(32))
+    status_reason = Column(Text, nullable=True)              # NEW: Reason for current status
+    priority = Column(Float, default=0)                      # NEW: Task priority (for queueing)
+    best_so_far = Column(Integer, default=0)                 # NEW: Boolean flag (0/1) for best-so-far
     assigned_worker = Column(String(255))
     file_path = Column(Text)
+    file_blob = Column(BLOB, nullable=True)  # For MySQL, use BLOB
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    last_heartbeat = Column(DateTime, nullable=True)  # <--- Added
+    last_heartbeat = Column(DateTime, nullable=True)
     attempt_count = Column(Integer)
     max_attempts = Column(Integer)
-    worker_job_id = Column(Integer)  # Add this line
+    fine_tune_depth = Column(Integer, default=0)             # NEW: Fine-tune chain depth (for stopping)
+    last_error = Column(Text, nullable=True)                 # NEW: Last error message if any
+    worker_job_id = Column(Integer)
 
     job = relationship("ControllerJob", back_populates="tasks")
     attempts = relationship("ControllerAttempt", back_populates="task")
@@ -54,6 +61,7 @@ class ControllerTask(Base):
     logs = relationship("ControllerTaskLog", back_populates="task")
     test_metrics = relationship("TestMetric", back_populates="task")
     trade_records = relationship("TradeRecord", back_populates="task")
+    parent_task = relationship("ControllerTask", remote_side=[id])  # Self-referential for lineage
 
 
 class ControllerAttempt(Base):

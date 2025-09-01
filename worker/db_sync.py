@@ -1,10 +1,68 @@
 import sqlite3
 import pymysql
 import os
+
+from sqlalchemy.orm import sessionmaker
+
 from config import (
     AGENT_DB_PATH,
     MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
 )
+from sqlalchemy import create_engine, text
+from contextlib import contextmanager
+
+# Utility: SQLAlchemy session context for controller DB
+@contextmanager
+def controller_db_session():
+    engine = create_engine(
+        f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT or 3306}/{MYSQL_DATABASE}?charset=utf8mb4"
+    )
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        engine.dispose()
+
+def link_artifacts_to_test_metrics_for_task(session, controller_task_id):
+    """
+    For a specific controller_task_id, link controller_artifacts of type 'output_set'
+    to their corresponding test_metrics (by exact file_name match), but only update
+    if the link_id is missing or incorrect.
+    """
+    # Step 1: Find all candidate artifact/test_metrics pairs that should be linked
+    select_sql = text("""
+        SELECT a.id AS artifact_id, t.id AS test_metrics_id, a.link_id
+        FROM controller_artifacts a
+        JOIN test_metrics t
+          ON t.controller_task_id = a.task_id
+          AND a.artifact_type = 'output_set'
+          AND a.file_name = t.set_file_name
+          AND a.file_blob IS NOT NULL
+        WHERE a.task_id = :controller_task_id
+    """)
+    results = session.execute(select_sql, {'controller_task_id': controller_task_id}).fetchall()
+
+    # Step 2: Update only if link_id is missing or incorrect
+    update_sql = text("""
+        UPDATE controller_artifacts
+        SET link_type = 'test_metrics', link_id = :test_metrics_id
+        WHERE link_id = :link_id
+    """)
+    count = 0
+    for artifact_id, test_metrics_id, link_id in results:
+        if link_id != test_metrics_id:
+            session.execute(update_sql, {
+                'test_metrics_id': test_metrics_id,
+				'link_id': link_id
+            })
+            count += 1
+    print(f"Linked {count} artifacts to test_metrics for controller_task_id={controller_task_id}")
 
 def sync_test_metrics(worker_job_id):
     """
@@ -315,7 +373,8 @@ def sync_trade_records(worker_job_id):
 
 def sync_artifacts(worker_job_id):
     """
-    Sync set_file_artifacts rows for a specific worker job from agent (SQLite) to controller (MySQL) db.
+    Sync set_file_artifacts rows for a specific worker job from agent (SQLite) to controller (MySQL) db,
+    then link artifacts to test_metrics for this job's controller_task_id.
     Args:
         worker_job_id (int): The job.id (out_worker_JobId) to sync.
     """
@@ -335,8 +394,8 @@ def sync_artifacts(worker_job_id):
     """
 
     insert_sql = """
-    INSERT INTO set_file_artifacts (
-        controller_task_id,
+    INSERT INTO controller_artifacts (
+        task_id,
         artifact_type,
         file_path,
         file_name,
@@ -352,6 +411,9 @@ def sync_artifacts(worker_job_id):
     agent_cursor = agent_conn.cursor()
     agent_cursor.execute(agent_sql, (worker_job_id,))
     rows = agent_cursor.fetchall()
+
+    # Get controller_task_id (assume all rows for this worker_job_id share the same controller_task_id)
+    controller_task_id = rows[0][0] if rows else None
 
     # Connect to controller (MySQL)
     ctrl_conn = pymysql.connect(
@@ -392,6 +454,13 @@ def sync_artifacts(worker_job_id):
             )
         ctrl_conn.commit()
         print(f"Copied {len(rows)} artifact rows from agent job {worker_job_id} to controller DB.")
+
+        # --- Linking step ---
+        if controller_task_id:
+            with controller_db_session() as session:
+                link_artifacts_to_test_metrics_for_task(session, controller_task_id)
+            print(f"Linked artifacts to test_metrics for controller_task_id={controller_task_id}")
+
     except Exception as e:
         ctrl_conn.rollback()
         print(f"Error during artifact sync: {e}")
@@ -404,23 +473,22 @@ def sync_artifacts(worker_job_id):
 def sync_ai_suggestions(worker_job_id):
     """
     Sync optimization_suggestion, optimization_section, and optimization_parameter from agent (SQLite)
-    to controller (MySQL) for a specific worker job, in the order:
-    1. optimization_suggestion
-    2. optimization_section
-    3. optimization_parameter
+    to controller (MySQL) for a specific worker job, using correct controller job/task ids.
     """
+    import sqlite3
+    import pymysql
+
     # 1. Fetch suggestions (parent)
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
     agent_cursor = agent_conn.cursor()
-    # Fetch all suggestions for the job, along with their step id for later joins
+    # Use controller_job_id and controller_task_id for the insert mapping!
     agent_cursor.execute(
         """
         SELECT
             sug.id,
-            j.controller_task_id,
-            sug.step_id,
-            sug.suggestion_json,
-            sug.score,
+            j.controller_job_id AS job_id,      -- controller_jobs.id for controller DB
+            j.controller_task_id AS task_id,    -- controller_tasks.id for controller DB
+            sug.mode,                           -- used as prompt (since agent does not store prompt/response)
             sug.created_at
         FROM set_file_jobs j
         JOIN set_file_steps s ON s.job_id = j.id
@@ -428,11 +496,22 @@ def sync_ai_suggestions(worker_job_id):
         WHERE j.id = ?
         """, (worker_job_id,)
     )
-    suggestion_rows = agent_cursor.fetchall()
+    suggestion_rows_raw = agent_cursor.fetchall()
+    # Prepare for controller_ai_suggestions insert (id, job_id, task_id, prompt, response, created_at)
+    suggestion_rows = [
+        (
+            row[0],  # id
+            row[1],  # job_id (controller_job_id)
+            row[2],  # task_id (controller_task_id)
+            row[3] if row[3] is not None else "",  # prompt (use mode from agent)
+            "",     # response (not in agent db)
+            row[4]  # created_at
+        )
+        for row in suggestion_rows_raw
+    ]
 
     # 2. Fetch sections (children)
-    # Get all suggestion IDs for this job
-    suggestion_ids = [row[0] for row in suggestion_rows]
+    suggestion_ids = [row[0] for row in suggestion_rows_raw]
     section_rows = []
     if suggestion_ids:
         ph = ",".join("?" for _ in suggestion_ids)
@@ -442,8 +521,7 @@ def sync_ai_suggestions(worker_job_id):
                 sec.id,
                 sec.suggestion_id,
                 sec.section_name,
-                sec.section_json,
-                sec.created_at
+                sec.explanation
             FROM optimization_section sec
             WHERE sec.suggestion_id IN ({ph})
             """,
@@ -460,10 +538,11 @@ def sync_ai_suggestions(worker_job_id):
             SELECT
                 param.id,
                 param.suggestion_id,
-                param.param_name,
-                param.param_value,
-                param.param_json,
-                param.created_at
+                param.parameter_name,
+                param.start,
+                param.end,
+                param.step,
+                param.reason
             FROM optimization_parameter param
             WHERE param.suggestion_id IN ({ph})
             """,
@@ -484,21 +563,21 @@ def sync_ai_suggestions(worker_job_id):
     ctrl_cursor = ctrl_conn.cursor()
 
     try:
-        # 1. Insert optimization_suggestion (controller_ai_suggestions)
+        # 1. Insert controller_ai_suggestions
         insert_suggestion_sql = """
         INSERT INTO controller_ai_suggestions (
             id,
-            controller_task_id,
-            step_id,
-            suggestion_json,
-            score,
+            job_id,
+            task_id,
+            prompt,
+            response,
             created_at
         ) VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
-            controller_task_id=VALUES(controller_task_id),
-            step_id=VALUES(step_id),
-            suggestion_json=VALUES(suggestion_json),
-            score=VALUES(score),
+            job_id=VALUES(job_id),
+            task_id=VALUES(task_id),
+            prompt=VALUES(prompt),
+            response=VALUES(response),
             created_at=VALUES(created_at)
         """
         for row in suggestion_rows:
@@ -510,14 +589,12 @@ def sync_ai_suggestions(worker_job_id):
             id,
             suggestion_id,
             section_name,
-            section_json,
-            created_at
-        ) VALUES (%s, %s, %s, %s, %s)
+            explanation
+        ) VALUES (%s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             suggestion_id=VALUES(suggestion_id),
             section_name=VALUES(section_name),
-            section_json=VALUES(section_json),
-            created_at=VALUES(created_at)
+            explanation=VALUES(explanation)
         """
         for row in section_rows:
             ctrl_cursor.execute(insert_section_sql, row)
@@ -527,17 +604,19 @@ def sync_ai_suggestions(worker_job_id):
         INSERT INTO optimization_parameter (
             id,
             suggestion_id,
-            param_name,
-            param_value,
-            param_json,
-            created_at
-        ) VALUES (%s, %s, %s, %s, %s, %s)
+            parameter_name,
+            start,
+            end,
+            step,
+            reason
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             suggestion_id=VALUES(suggestion_id),
-            param_name=VALUES(param_name),
-            param_value=VALUES(param_value),
-            param_json=VALUES(param_json),
-            created_at=VALUES(created_at)
+            parameter_name=VALUES(parameter_name),
+            start=VALUES(start),
+            end=VALUES(end),
+            step=VALUES(step),
+            reason=VALUES(reason)
         """
         for row in parameter_rows:
             ctrl_cursor.execute(insert_parameter_sql, row)

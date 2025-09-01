@@ -34,8 +34,24 @@ WORKER_ID = os.getenv('WORKER_ID', 'worker_1')
 UIPATH_CLI = os.getenv('UIPATH_CLI')
 UIPATH_WORKFLOW = os.getenv('UIPATH_WORKFLOW')
 
+# Worker-specific output and polling settings
+OUTPUT_JSON_DIR = os.getenv('OUTPUT_JSON_DIR')
+OUTPUT_JSON_POLL_INTERVAL = int(os.getenv('OUTPUT_JSON_POLL_INTERVAL', 5))
+OUTPUT_JSON_WARNING_MODULUS = int(os.getenv('OUTPUT_JSON_WARNING_MODULUS', 150))
+
+# UiPath job management (worker)
+UIPATH_JOB_MAX_SECONDS = int(os.getenv('UIPATH_JOB_MAX_SECONDS', 43200))
+UIPATH_KILL_FILE = os.getenv('UIPATH_KILL_FILE')
+
 # Logging
 LOG_DIR = os.getenv('LOG_DIR', 'logs')
+
+# Controller Retry and optimization/fairness thresholds
+TASK_MAX_ATTEMPTS = int(os.getenv('MAX_ATTEMPTS', 3))
+MAX_FINE_TUNE_DEPTH = int(os.getenv('MAX_FINE_TUNE_DEPTH', 2))
+DISTANCE_THRESHOLD = float(os.getenv('DISTANCE_THRESHOLD', 0.1))
+SCORE_THRESHOLD = float(os.getenv('SCORE_THRESHOLD', 0.8))
+AGING_FACTOR = float(os.getenv('AGING_FACTOR', 1.0))
 
 # Supervisor polling intervals and thresholds (in minutes)
 JOB_STUCK_THRESHOLD_MINUTES = int(os.getenv('JOB_STUCK_THRESHOLD_MINUTES', 60))
