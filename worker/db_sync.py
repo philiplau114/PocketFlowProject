@@ -210,7 +210,7 @@ def sync_test_metrics(worker_job_id):
         input_html_file,
         input_set_file,
         optimization_pass_id
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     # Connect to controller (MySQL)
@@ -227,6 +227,9 @@ def sync_test_metrics(worker_job_id):
 
     try:
         for row in rows:
+            print("INSERT columns:", insert_sql.split('(')[1].split(')')[0].count(',') + 1)
+            print("Row length:", len(row))
+            print("Placeholders:", insert_sql.count("%s"))
             ctrl_cursor.execute(insert_sql, row)
         ctrl_conn.commit()
         print(f"Copied {len(rows)} test_metrics rows from agent job {worker_job_id} to controller DB.")

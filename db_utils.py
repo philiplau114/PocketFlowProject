@@ -4,6 +4,13 @@ from sqlalchemy import create_engine, and_
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timedelta
 from db.db_models import *
+from db.status_constants import (
+    JOB_STATUS_NEW, JOB_STATUS_QUEUED, JOB_STATUS_IN_PROGRESS,
+    JOB_STATUS_COMPLETED_SUCCESS, JOB_STATUS_COMPLETED_PARTIAL, JOB_STATUS_FAILED,
+    STATUS_NEW, STATUS_QUEUED, STATUS_WORKER_IN_PROGRESS, STATUS_WORKER_COMPLETED,
+    STATUS_WORKER_FAILED, STATUS_RETRYING, STATUS_FINE_TUNING, STATUS_COMPLETED_SUCCESS,
+    STATUS_COMPLETED_PARTIAL, STATUS_FAILED,
+)
 from config import SQLALCHEMY_DATABASE_URL, SYMBOL_CSV_PATH
 
 # Import the actual set file field extractor
@@ -58,7 +65,7 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
         timeframe=meta["timeframe"],
         ea_name=meta["ea_name"],
         original_file=set_file_path,
-        status="queued",
+        status=STATUS_NEW,
         max_attempts=1,
         attempt_count=0,
     )
@@ -68,7 +75,7 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
         job_id=job.id,
         step_number=1,
         step_name="optimize",
-        status="queued",
+        status=STATUS_NEW,
         assigned_worker=None,
         file_path=set_file_path,
         description=f"Optimization for {meta['ea_name']}",
@@ -80,6 +87,50 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
     # Return IDs and a flag indicating it's new
     return job.id, task.id, True
 
+def update_job_status(session, job_id):
+    """
+    Inspects all tasks for the job and updates job.status according to the collective state of its tasks.
+    """
+    job = session.query(ControllerJob).filter(ControllerJob.id == job_id).first()
+    if not job:
+        return
+
+    tasks = session.query(ControllerTask).filter(ControllerTask.job_id == job_id).all()
+    if not tasks:
+        return
+
+    # Gather all statuses
+    statuses = set([t.status for t in tasks])
+
+    # 1. Check for any in-progress tasks
+    in_progress_statuses = {
+        STATUS_NEW, STATUS_QUEUED, STATUS_WORKER_IN_PROGRESS,
+        STATUS_RETRYING, STATUS_FINE_TUNING
+    }
+    if statuses & in_progress_statuses:
+        new_status = JOB_STATUS_IN_PROGRESS
+
+    else:
+        all_success = all(t.status == STATUS_COMPLETED_SUCCESS for t in tasks)
+        any_success = any(t.status == STATUS_COMPLETED_SUCCESS for t in tasks)
+        any_partial = any(t.status == STATUS_COMPLETED_PARTIAL for t in tasks)
+        any_failed = any(t.status == STATUS_FAILED for t in tasks)
+
+        if all_success:
+            new_status = JOB_STATUS_COMPLETED_SUCCESS
+        elif any_success:
+            # at least one success, but not all (since not all_success above)
+            new_status = JOB_STATUS_COMPLETED_PARTIAL
+        elif any_partial or any_failed:
+            # no successes, but at least one partial or failed
+            new_status = JOB_STATUS_FAILED
+        else:
+            # fallback (should not occur)
+            new_status = JOB_STATUS_FAILED
+
+    if job.status != new_status:
+        job.status = new_status
+        session.commit()
 def update_task_status(session, task_id, status, assigned_worker=None):
     task = session.query(ControllerTask).filter(ControllerTask.id == task_id).first()
     if task:
@@ -95,7 +146,22 @@ def update_task_worker_job(session, task_id, worker_job_id):
         task.worker_job_id = worker_job_id
         session.commit()
 
-def create_attempt(session, task_id, status="in_progress"):
+# def create_attempt(session, task_id, status="in_progress"):
+#     last_attempt = session.query(ControllerAttempt).filter(
+#         ControllerAttempt.task_id == task_id
+#     ).order_by(ControllerAttempt.attempt_number.desc()).first()
+#     attempt_number = (last_attempt.attempt_number + 1) if last_attempt else 1
+#     attempt = ControllerAttempt(
+#         task_id=task_id,
+#         attempt_number=attempt_number,
+#         status=status,
+#         started_at=datetime.utcnow()
+#     )
+#     session.add(attempt)
+#     session.commit()
+#     return attempt.id
+
+def create_attempt(session, task_id, status=STATUS_WORKER_IN_PROGRESS):
     last_attempt = session.query(ControllerAttempt).filter(
         ControllerAttempt.task_id == task_id
     ).order_by(ControllerAttempt.attempt_number.desc()).first()

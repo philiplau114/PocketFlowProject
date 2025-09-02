@@ -1,7 +1,16 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Paths to env files
+ENV_PATH = os.path.join(PROJECT_ROOT, '.env')
+ENV_CONTROLLER_PATH = os.path.join(PROJECT_ROOT, 'controller', '.env.controller')
+ENV_WORKER_PATH = os.path.join(PROJECT_ROOT, 'worker', '.env.worker')
+
+load_dotenv(ENV_PATH, override=False)
+load_dotenv(ENV_CONTROLLER_PATH, override=True)
+load_dotenv(ENV_WORKER_PATH, override=True)
 
 # Database
 SQLALCHEMY_DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URL')
@@ -21,6 +30,9 @@ REDIS_QUEUE = os.getenv('REDIS_QUEUE', 'pfai_tasks')
 # Watch folder for input .set files
 SET_FILE_LIBRARY = os.getenv('SET_FILE_LIBRARY')
 WATCH_FOLDER = os.path.join(SET_FILE_LIBRARY, '01_user_inputs') if SET_FILE_LIBRARY else None
+# 99_processed folder for moved/processed .set files
+PROCESSED_FOLDER = os.path.join(SET_FILE_LIBRARY, '99_processed') if SET_FILE_LIBRARY else None
+
 
 # Symbol list for .set file parsing
 SYMBOL_CSV_PATH = os.getenv('SYMBOL_CSV_PATH', os.path.join(SET_FILE_LIBRARY or '', 'SymbolList.csv'))
@@ -38,6 +50,8 @@ UIPATH_WORKFLOW = os.getenv('UIPATH_WORKFLOW')
 OUTPUT_JSON_DIR = os.getenv('OUTPUT_JSON_DIR')
 OUTPUT_JSON_POLL_INTERVAL = int(os.getenv('OUTPUT_JSON_POLL_INTERVAL', 5))
 OUTPUT_JSON_WARNING_MODULUS = int(os.getenv('OUTPUT_JSON_WARNING_MODULUS', 150))
+
+UIPATH_MT4_LIB= os.getenv('UIPATH_MT4_LIB')
 
 # UiPath job management (worker)
 UIPATH_JOB_MAX_SECONDS = int(os.getenv('UIPATH_JOB_MAX_SECONDS', 43200))

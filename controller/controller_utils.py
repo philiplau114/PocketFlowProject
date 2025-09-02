@@ -2,18 +2,26 @@ from sqlalchemy import text
 from db.db_models import ControllerTask, ControllerArtifact
 from datetime import datetime
 
+from sqlalchemy import text
+
+from sqlalchemy import text
+from db.status_constants import STATUS_FINE_TUNING
+
 def get_task_metric_scores(session, task_ids):
     if not task_ids:
         return {}
+    # Build named placeholders
+    placeholders = ', '.join([f':id{i}' for i in range(len(task_ids))])
     sql = text(f"""
         SELECT controller_task_id, 
                normalized_total_distance_to_good AS distance, 
                weighted_score AS score
         FROM v_test_metrics_scored
-        WHERE controller_task_id IN :task_ids
+        WHERE controller_task_id IN ({placeholders})
         ORDER BY id DESC
     """)
-    result = session.execute(sql, {"task_ids": tuple(task_ids)})
+    params = {f'id{i}': v for i, v in enumerate(task_ids)}
+    result = session.execute(sql, params)
     scores = {}
     for row in result:
         if row.controller_task_id not in scores:
@@ -30,7 +38,7 @@ def spawn_fine_tune_task(session, parent_task):
     Sets the new task's file_blob to the best artifact's file_blob.
     Commits and returns new task and the file_blob (optional).
     """
-    from db.db_models import ControllerTask, TestMetrics, ControllerArtifact
+    from db.db_models import ControllerTask, ControllerArtifact
     from sqlalchemy import and_
     from datetime import datetime
 
@@ -66,7 +74,7 @@ def spawn_fine_tune_task(session, parent_task):
         parent_task_id=parent_task.id,
         step_number=(parent_task.step_number or 0) + 1,
         step_name="fine_tune",
-        status="fine_tuning",
+        status=STATUS_FINE_TUNING,
         status_reason="Spawned for fine-tuning",
         priority=parent_task.priority,
         best_so_far=0,
@@ -91,6 +99,8 @@ def queue_task_to_redis(r, task):
     import json
     import os
     from config import REDIS_QUEUE
+    print(
+        f"DEBUG: queue_task_to_redis called with task.id={task.id} ({type(task.id)}), task.job_id={task.job_id} ({type(task.job_id)})")
     file_blob_key = f"task:{task.id}:input_blob"
     if task.file_blob:
         r.set(file_blob_key, task.file_blob)
@@ -103,4 +113,5 @@ def queue_task_to_redis(r, task):
         "symbol": getattr(task, "symbol", None),
         "timeframe": getattr(task, "timeframe", None),
     }
+    print(f"DEBUG: task_data = {task_data}")
     r.lpush(REDIS_QUEUE, json.dumps(task_data))
