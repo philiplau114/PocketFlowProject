@@ -29,7 +29,7 @@ load_dotenv(os.path.join(WORKER_DIR, '.env.worker'), override=True)
 
 from config import (
     REDIS_HOST, REDIS_PORT, REDIS_QUEUE, WORKER_ID,
-    UIPATH_CLI, UIPATH_WORKFLOW, UIPATH_JOB_MAX_SECONDS, UIPATH_KILL_FILE, UIPATH_MT4_LIB,
+    UIPATH_CLI, UIPATH_WORKFLOW, UIPATH_JOB_MAX_SECONDS, UIPATH_KILL_FILE, UIPATH_MT4_LIB, UIPATH_CONFIG,
     OUTPUT_JSON_DIR, OUTPUT_JSON_POLL_INTERVAL, OUTPUT_JSON_WARNING_MODULUS
 )
 from db_utils import (
@@ -122,7 +122,8 @@ def main():
                     "in_JobId": str(job_id),
                     "in_TaskId": str(task_id),
                     "in_InputSetFilePath": set_file_path,
-                    "in_OutputJsonPath": output_json_path
+                    "in_OutputJsonPath": output_json_path,
+                    "in_ConfigPath": UIPATH_CONFIG
                 }
                 logger.debug(f"UiPath process input: {uipath_input}")
                 process = subprocess.Popen(
