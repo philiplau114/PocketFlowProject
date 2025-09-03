@@ -1,3 +1,4 @@
+# Python virtual environments, bytecode, and caches
 venv/
 __pycache__/
 *.pyc
@@ -5,3 +6,17 @@ __pycache__/
 *.db
 .DS_Store
 *.log
+
+# PyArmor output and runtime files
+/dist/
+/build/
+/output/
+pyarmor.lic
+pytransform.key
+pytransform3.so
+pytransform3.dll
+pytransform3.dylib
+
+# IDE/editor configs
+.idea/
+.vscode/
