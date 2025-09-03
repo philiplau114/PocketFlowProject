@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import os
 
 # Load .env.controller first (if present), then .env for defaults
-load_dotenv('.env.controller', override=True)
+load_dotenv('../controller/.env.controller', override=True)
 load_dotenv('.env', override=False)
 
 from config import WATCH_FOLDER, REDIS_HOST, REDIS_PORT, REDIS_QUEUE, USER_ID

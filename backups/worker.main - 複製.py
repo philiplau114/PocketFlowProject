@@ -11,7 +11,7 @@ from db_utils import (
     update_task_status, create_attempt, finish_attempt, get_db,
     update_task_worker_job, update_task_heartbeat
 )
-from .db_sync import sync_test_metrics, sync_trade_records, sync_artifacts, sync_ai_suggestions
+from worker.db_sync import sync_test_metrics, sync_trade_records, sync_artifacts, sync_ai_suggestions
 from notify import send_email, send_telegram
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')

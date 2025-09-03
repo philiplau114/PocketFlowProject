@@ -21,7 +21,7 @@ WORKER_DIR = os.path.join(PROJECT_ROOT, 'controller')
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=False)
 
 # Load .env.worker from the worker directory
-load_dotenv(os.path.join(WORKER_DIR, '.env.controller'), override=True)
+load_dotenv(os.path.join(WORKER_DIR, '../controller/.env.controller'), override=True)
 
 from config import (
     REDIS_HOST, REDIS_PORT, REDIS_QUEUE, WATCH_FOLDER, USER_ID,
