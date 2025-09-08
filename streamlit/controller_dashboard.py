@@ -28,6 +28,44 @@ r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 st.set_page_config(page_title="Controller/Worker Monitoring Dashboard", layout="wide")
 st.title("⚡ Controller/Worker Monitoring Dashboard")
 
+# --- THRESHOLDS MANAGEMENT ---
+st.header("Threshold Management")
+
+with engine.connect() as conn:
+    # Try to read thresholds from DB
+    try:
+        df_thresh = pd.read_sql("SELECT name, value FROM controller_thresholds", conn)
+    except Exception as e:
+        df_thresh = pd.DataFrame()
+        st.warning(f"Could not read controller_thresholds table: {e}")
+
+    if not df_thresh.empty:
+        st.subheader("Current Thresholds (Editable)")
+        thresh_updates = {}
+        cols = st.columns(len(df_thresh))
+        for i, row in enumerate(df_thresh.itertuples()):
+            thresh_updates[row.name] = cols[i].number_input(
+                f"{row.name}", value=float(row.value), key=f"thresh_{row.name}", step=0.01
+            )
+        if st.button("Update Thresholds"):
+            for name, value in thresh_updates.items():
+                conn.execute(
+                    sqlalchemy.text("UPDATE controller_thresholds SET value = :value WHERE name = :name"),
+                    {"value": value, "name": name}
+                )
+            st.success("Thresholds updated! Please refresh the page to see changes.")
+    else:
+        st.info("No dynamic thresholds found. Using .env.controller values.")
+        st.write({
+            "MAX_ATTEMPTS": config.MAX_ATTEMPTS,
+            "MAX_FINE_TUNE_DEPTH": config.MAX_FINE_TUNE_DEPTH,
+            "DISTANCE_THRESHOLD": config.DISTANCE_THRESHOLD,
+            "SCORE_THRESHOLD": config.SCORE_THRESHOLD,
+            "AGING_FACTOR": config.AGING_FACTOR,
+        })
+
+st.markdown("---")
+
 # --- TASK STATUS OVERVIEW ---
 st.header("Task Status Overview")
 with engine.connect() as conn:

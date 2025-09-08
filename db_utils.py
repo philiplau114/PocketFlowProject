@@ -87,6 +87,11 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
     # Return IDs and a flag indicating it's new
     return job.id, task.id, True
 
+def job_has_success(session, job_id):
+    return session.query(ControllerTask).filter(
+        ControllerTask.job_id == job_id,
+        ControllerTask.status == STATUS_COMPLETED_SUCCESS
+    ).count() > 0
 def update_job_status(session, job_id):
     """
     Inspects all tasks for the job and updates job.status according to the collective state of its tasks.

@@ -3,10 +3,11 @@ import pandas as pd
 import sqlalchemy
 import sys
 import os
+from io import BytesIO
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 import redis
-from io import BytesIO
 
 # --- CONFIG ---
 if hasattr(config, "SQLALCHEMY_DATABASE_URL") and config.SQLALCHEMY_DATABASE_URL:
@@ -94,7 +95,7 @@ filtered['Rank'] = filtered.index + 1
 display_cols = [
     "Rank", "set_file_name", "symbol", "net_profit", "max_drawdown",
     "total_trades", "recovery_factor", "weighted_score", "win_rate", "profit_factor",
-    "expected_payoff", "status"
+    "expected_payoff", "normalized_total_distance_to_good", "status"
 ]
 display_df = filtered[display_cols]
 display_df = display_df.rename(columns={
@@ -108,6 +109,7 @@ display_df = display_df.rename(columns={
     "win_rate": "Win Rate",
     "profit_factor": "Profit Factor",
     "expected_payoff": "Expected Payoff",
+    "normalized_total_distance_to_good": "Distance",
     "status": "Status",
 })
 
@@ -124,17 +126,21 @@ def color_score(val):
 def color_win_rate(val):
     return "color: green;" if val > 60 else "color: orange;" if val > 50 else "color: red;"
 
+def color_distance(val):
+    return "color: green;" if val < 0.5 else "color: orange;" if val < 1.0 else "color: red;"
+
 styled_df = display_df.style.\
-    applymap(color_net_profit, subset=["Net Profit"]).\
-    applymap(color_max_dd, subset=["Max DD"]).\
-    applymap(color_score, subset=["Score"]).\
-    applymap(color_win_rate, subset=["Win Rate"])
+    map(color_net_profit, subset=["Net Profit"]).\
+    map(color_max_dd, subset=["Max DD"]).\
+    map(color_score, subset=["Score"]).\
+    map(color_win_rate, subset=["Win Rate"]).\
+    map(color_distance, subset=["Distance"])
 
 col1, col2 = st.columns([2, 3])
 
 with col1:
     st.subheader("Strategies")
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    st.dataframe(styled_df, width='stretch', hide_index=True)
     if len(filtered) > 0:
         selected_idx = st.number_input(
             "Select strategy rank for detail", min_value=1, max_value=len(filtered), value=1, step=1
@@ -160,7 +166,7 @@ with col2:
             kpi4, kpi5, kpi6 = st.columns(3)
             kpi4.metric("Recovery Factor", f"{strategy['recovery_factor']:.2f}")
             kpi5.metric("Weighted Score", f"{strategy['weighted_score']:.2f}")
-            kpi6.metric("Normalized Distance", f"{strategy['normalized_total_distance_to_good']:.2f}")
+            kpi6.metric("Distance", f"{strategy['normalized_total_distance_to_good']:.2f}")
 
             kpi7, kpi8, kpi9 = st.columns(3)
             kpi7.metric("Win Rate", f"{strategy['win_rate']:.2f}%")
@@ -211,7 +217,7 @@ with col2:
         if not gif_row.empty:
             gif = gif_row.iloc[0]
             if gif["file_blob"] is not None:
-                st.image(BytesIO(gif["file_blob"]), caption=gif["file_name"], use_column_width=True)
+                st.image(BytesIO(gif["file_blob"]), caption=gif["file_name"], width='stretch')
             else:
                 st.info("No equity curve available (file is empty).")
         else:

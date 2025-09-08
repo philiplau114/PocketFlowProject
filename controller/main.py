@@ -8,9 +8,11 @@ from pathlib import Path
 from datetime import datetime
 import shutil
 
+import config  # Only import config, not individual constants!
+
 from dotenv import load_dotenv
 from sqlalchemy import or_, and_
-from db_utils import get_db, update_job_status
+from db_utils import get_db, update_job_status, job_has_success
 from db.db_models import ControllerTask
 from db.status_constants import (
     STATUS_NEW, STATUS_QUEUED, STATUS_WORKER_COMPLETED, STATUS_WORKER_FAILED,
@@ -24,11 +26,6 @@ WORKER_DIR = os.path.join(PROJECT_ROOT, 'controller')
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=False)
 load_dotenv(os.path.join(WORKER_DIR, '.env.controller'), override=True)
 
-from config import (
-    REDIS_HOST, REDIS_PORT, REDIS_QUEUE, WATCH_FOLDER, PROCESSED_FOLDER,
-    USER_ID, TASK_MAX_ATTEMPTS, MAX_FINE_TUNE_DEPTH,
-    DISTANCE_THRESHOLD, SCORE_THRESHOLD, AGING_FACTOR,
-)
 from notify import send_email, send_telegram
 from controller.controller_utils import (
     get_task_metric_scores,
@@ -54,7 +51,7 @@ def effective_priority(task, now=None):
     base = task.priority or 0
     retry_bump = 2 ** (task.attempt_count or 0) if task.status == STATUS_RETRYING else 0
     age_minutes = ((now - (task.updated_at or task.created_at)).total_seconds() / 60) if (task.updated_at or task.created_at) else 0
-    aging = AGING_FACTOR * age_minutes
+    aging = config.AGING_FACTOR * age_minutes
     return base + retry_bump + aging
 
 def mark_task_failed(session, task, reason=None):
@@ -83,7 +80,7 @@ def hybrid_priority(task, now=None):
     now = now or datetime.utcnow()
     base = task.priority or 10
     age_minutes = ((now - (task.updated_at or task.created_at)).total_seconds() / 60) if (task.updated_at or task.created_at) else 0
-    aging = AGING_FACTOR * age_minutes
+    aging = config.AGING_FACTOR * age_minutes
     if getattr(task, "status", None) == STATUS_RETRYING:
         return (base * (2 ** (task.attempt_count or 1))) + aging
     elif getattr(task, "step_name", None) == "fine_tune" and hasattr(task, "_distance") and task._distance is not None:
@@ -92,7 +89,7 @@ def hybrid_priority(task, now=None):
         return base + aging
 
 def mark_task_retrying(session, task):
-    if (task.attempt_count or 0) < (task.max_attempts or TASK_MAX_ATTEMPTS):
+    if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
         task.status = STATUS_RETRYING
         task.updated_at = datetime.utcnow()
         session.commit()
@@ -100,21 +97,33 @@ def mark_task_retrying(session, task):
         logging.info(f"Task {task.id} marked as {STATUS_RETRYING}.")
 
 def main_loop():
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+    r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=False)
     POLL_INTERVAL = 20  # seconds
 
     BATCH_SIZE = 10
     MIN_NEW = 2
 
+    last_reload = time.time()
+
     while not stop_flag:
+        now = time.time()
+        if now - last_reload > config.RELOAD_INTERVAL:
+            thresholds_db = config.load_thresholds_from_db()
+            config.TASK_MAX_ATTEMPTS = int(thresholds_db.get('MAX_ATTEMPTS', config.TASK_MAX_ATTEMPTS))
+            config.MAX_FINE_TUNE_DEPTH = int(thresholds_db.get('MAX_FINE_TUNE_DEPTH', config.MAX_FINE_TUNE_DEPTH))
+            config.DISTANCE_THRESHOLD = float(thresholds_db.get('DISTANCE_THRESHOLD', config.DISTANCE_THRESHOLD))
+            config.SCORE_THRESHOLD = float(thresholds_db.get('SCORE_THRESHOLD', config.SCORE_THRESHOLD))
+            config.AGING_FACTOR = float(thresholds_db.get('AGING_FACTOR', config.AGING_FACTOR))
+            last_reload = now
+
         # --- WATCH_FOLDER LOGIC ---
-        for file in Path(WATCH_FOLDER).glob("*.set"):
+        for file in Path(config.WATCH_FOLDER).glob("*.set"):
             try:
                 print(f"DEBUG: Processing file: {file}")
                 meta = extract_setfile_metadata(str(file))
                 print(f"DEBUG: Metadata extracted: {meta}")
                 with get_db() as session:
-                    job_id, task_id, is_new = insert_job_and_task(session, meta, str(file), user_id=USER_ID)
+                    job_id, task_id, is_new = insert_job_and_task(session, meta, str(file), user_id=config.USER_ID)
                     print(f"DEBUG: job_id={job_id}, task_id={task_id}, is_new={is_new}")
                     if not is_new:
                         print(f"DEBUG: Skipping {file} as job/task already exists.")
@@ -128,8 +137,8 @@ def main_loop():
                     # DO NOT set status to 'queued' here; keep as STATUS_NEW
                     session.commit()
                     print("DEBUG: file_blob committed to DB")
-                shutil.move(str(file), str(PROCESSED_FOLDER / file.name))
-                logging.info(f"Moved processed file {file.name} to {PROCESSED_FOLDER}")
+                shutil.move(str(file), str(config.PROCESSED_FOLDER / file.name))
+                logging.info(f"Moved processed file {file.name} to {config.PROCESSED_FOLDER}")
                 print(f"DEBUG: Task for file {file.name} processed and ready for queueing.")
                 logging.info("Created new task: %s (using file_blob)", file.name)
             except Exception as e:
@@ -148,30 +157,35 @@ def main_loop():
                     ControllerTask.status.in_([STATUS_WORKER_COMPLETED, STATUS_WORKER_FAILED])
                 ).all()
                 for task in finished_tasks:
+                    if job_has_success(session, task.job_id):
+                        logging.info(
+                            f"Job {task.job_id} already has a successful task. Skipping retry/fine-tune for task {task.id}.")
+                        continue
+
                     if task.status == STATUS_WORKER_COMPLETED:
                         task_ids = [task.id]
                         metrics_map = get_task_metric_scores(session, task_ids)
                         m = metrics_map.get(task.id, {})
                         task._distance = m.get('distance')
                         task._score = m.get('score')
-                        if (task._distance is not None and task._distance <= DISTANCE_THRESHOLD) and \
-                           (task._score is not None and task._score >= SCORE_THRESHOLD):
+                        if (task._distance is not None and task._distance <= config.DISTANCE_THRESHOLD) and \
+                           (task._score is not None and task._score >= config.SCORE_THRESHOLD):
                             mark_task_success(session, task)
-                        elif (task._distance is not None and task._distance <= DISTANCE_THRESHOLD) or \
-                             (task._score is not None and task._score >= SCORE_THRESHOLD):
+                        elif (task._distance is not None and task._distance <= config.DISTANCE_THRESHOLD) or \
+                             (task._score is not None and task._score >= config.SCORE_THRESHOLD):
                             mark_task_partial(session, task)
-                            if (task.fine_tune_depth or 0) < MAX_FINE_TUNE_DEPTH:
+                            if (task.fine_tune_depth or 0) < config.MAX_FINE_TUNE_DEPTH:
                                 child = spawn_fine_tune_task(session, task)
                                 queue_task_to_redis(r, child)
                         else:
-                            if (task.attempt_count or 0) < (task.max_attempts or TASK_MAX_ATTEMPTS):
+                            if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
                                 mark_task_retrying(session, task)
                             else:
                                 mark_task_failed(session, task, reason="Max attempts reached after worker_completed")
                         session.commit()
                         update_job_status(session, task.job_id)
                     elif task.status == STATUS_WORKER_FAILED:
-                        if (task.attempt_count or 0) < (task.max_attempts or TASK_MAX_ATTEMPTS):
+                        if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
                             mark_task_retrying(session, task)
                         else:
                             mark_task_failed(session, task, reason="Worker failure and max attempts reached")
@@ -215,8 +229,9 @@ def main_loop():
                 queueable = [
                     t for t in scored_tasks
                     if t.status in queueable_status
-                    and (t.attempt_count or 0) < (t.max_attempts or TASK_MAX_ATTEMPTS)
-                    and (t.fine_tune_depth or 0) <= MAX_FINE_TUNE_DEPTH
+                    and (t.attempt_count or 0) < (t.max_attempts or config.TASK_MAX_ATTEMPTS)
+                    and (t.fine_tune_depth or 0) <= config.MAX_FINE_TUNE_DEPTH
+                    and not job_has_success(session, t.job_id)  # <-- add this line
                 ]
 
                 print(f"DEBUG: Found {len(queueable)} queueable tasks")
