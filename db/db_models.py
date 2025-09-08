@@ -1,11 +1,46 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Float, LargeBinary, BLOB
+    Column, Integer, String, Text, DateTime, ForeignKey, Float, LargeBinary, BLOB, JSON
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
 Base = declarative_base()
+
+import bcrypt
+
+class User:
+    def __init__(self, id, username, email, password_hash, role, status, date_registered, date_approved, approved_by, profile_data):
+        self.id = id
+        self.username = username
+        self.email = email
+        self.password_hash = password_hash
+        self.role = role
+        self.status = status
+        self.date_registered = date_registered
+        self.date_approved = date_approved
+        self.approved_by = approved_by
+        self.profile_data = profile_data
+
+    @staticmethod
+    def hash_password(password: str) -> str:
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    @staticmethod
+    def verify_password(password: str, password_hash: str) -> bool:
+        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+
+class AuditLog(Base):
+    __tablename__ = 'audit_log'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    action = Column(String(128), nullable=False)
+    target_id = Column(String(128))
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    details = Column(JSON)  # Or Text if your MySQL lacks JSON support
+
+    # Optionally, add relationship to User
+    user = relationship("User")
 
 class ControllerJob(Base):
     __tablename__ = 'controller_jobs'
