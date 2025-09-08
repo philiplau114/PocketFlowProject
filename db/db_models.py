@@ -9,19 +9,20 @@ Base = declarative_base()
 
 import bcrypt
 
-class User:
-    def __init__(self, id, username, email, password_hash, role, status, date_registered, date_approved, approved_by, profile_data):
-        self.id = id
-        self.username = username
-        self.email = email
-        self.password_hash = password_hash
-        self.role = role
-        self.status = status
-        self.date_registered = date_registered
-        self.date_approved = date_approved
-        self.approved_by = approved_by
-        self.profile_data = profile_data
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(255), unique=True, nullable=False)
+    email = Column(String(255), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(32), default='user')
+    status = Column(String(32), default='Pending')
+    date_registered = Column(DateTime, default=datetime.utcnow)
+    date_approved = Column(DateTime)
+    approved_by = Column(Integer)
+    profile_data = Column(JSON)
 
+    # Password helpers
     @staticmethod
     def hash_password(password: str) -> str:
         return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -37,9 +38,7 @@ class AuditLog(Base):
     action = Column(String(128), nullable=False)
     target_id = Column(String(128))
     timestamp = Column(DateTime, default=datetime.utcnow)
-    details = Column(JSON)  # Or Text if your MySQL lacks JSON support
-
-    # Optionally, add relationship to User
+    details = Column(JSON)
     user = relationship("User")
 
 class ControllerJob(Base):

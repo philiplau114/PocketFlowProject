@@ -241,6 +241,13 @@ def update_user_status(session, user_id, status, approved_by=None):
         user.approved_by = approved_by
     session.commit()
 
+def change_user_role(session, user_id, new_role, admin_id):
+    user = session.query(User).filter_by(id=user_id).first()
+    if user:
+        user.role = new_role
+        session.commit()
+        log_action(session, admin_id, "Role Changed", target_id=user_id, details={"new_role": new_role})
+
 def log_action(session, user_id, action, target_id=None, details=None):
     log = AuditLog(
         user_id=user_id,
