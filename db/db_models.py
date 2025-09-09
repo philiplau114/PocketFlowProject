@@ -17,7 +17,7 @@ class User(Base):
     username = Column(String(255), unique=True, nullable=False)
     email = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(32), default='user')
+    role = Column(String(32), default='Standard')
     status = Column(String(32), default='Pending')
     date_registered = Column(DateTime, default=datetime.utcnow)
     date_approved = Column(DateTime)
