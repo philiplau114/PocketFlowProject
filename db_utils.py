@@ -219,13 +219,25 @@ def fetch_user_by_username(session, username):
 def fetch_user_by_id(session, user_id):
     return session.query(User).filter_by(id=user_id).first()
 
-def create_user(session, username, email, password_hash):
+def set_open_router_api_key(db_session, username, api_key):
+    user = db_session.query(User).filter_by(username=username).first()
+    if user:
+        user.open_router_api_key = api_key
+        db_session.commit()
+        return True
+    return False
+
+def get_open_router_api_key(db_session, username):
+    user = db_session.query(User).filter_by(username=username).first()
+    return user.open_router_api_key if user else None
+def create_user(session, username, email, password_hash, open_router_api_key=None):
     user = User(
         username=username,
         email=email,
         password_hash=password_hash,
         status='Pending',
-        date_registered=datetime.utcnow()
+        date_registered=datetime.utcnow(),
+        open_router_api_key=open_router_api_key
     )
     session.add(user)
     session.commit()

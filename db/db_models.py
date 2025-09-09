@@ -1,7 +1,9 @@
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Float, LargeBinary, BLOB, JSON
 )
-from sqlalchemy.ext.declarative import declarative_base
+#from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
+#Base = declarative_base()
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -21,15 +23,17 @@ class User(Base):
     date_approved = Column(DateTime)
     approved_by = Column(Integer)
     profile_data = Column(JSON)
+    open_router_api_key = Column(String(128), nullable=True)
 
     # Password helpers
     @staticmethod
     def hash_password(password: str) -> str:
         return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-    @staticmethod
-    def verify_password(password: str, password_hash: str) -> bool:
-        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+    def verify_password(self, password):
+        # Example using bcrypt; replace with your hash check!
+        import bcrypt
+        return bcrypt.checkpw(password.encode(), self.password_hash.encode())
 
 class AuditLog(Base):
     __tablename__ = 'audit_log'

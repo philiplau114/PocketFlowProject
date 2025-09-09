@@ -1,36 +1,36 @@
-from db_utils import get_db, fetch_user_by_username, fetch_user_by_id, log_action
-from db_models import User
+from db.db_models import User
+from config import REDIS_HOST, REDIS_PORT
 import uuid
+import redis
 
-active_sessions = {}
+# Use config.py for Redis connection details
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
 
-def login(username, password):
-    session = get_db()
-    user = fetch_user_by_username(session, username)
+SESSION_PREFIX = "session:"
+
+def login(db_session, username, password):
+    user = db_session.query(User).filter_by(username=username).first()
     if not user:
         return None, "User not found"
-    if user.status != 'Approved':
+    if user.status != "Approved":
         return None, "User not approved"
-    if not User.verify_password(password, user.password_hash):
-        return None, "Invalid password"
-    if user.id in active_sessions:
-        return None, "User already has an active session"
+    if not user.verify_password(password):
+        return None, "Incorrect password"
     session_token = str(uuid.uuid4())
-    active_sessions[user.id] = session_token
-    log_action(session, user.id, "Login", details={"session_token": session_token})
+    # Store session in Redis with a 1-day (86400 sec) expiry
+    redis_client.setex(SESSION_PREFIX + session_token, 86400, username)
     return session_token, None
 
-def logout(user_id):
-    session = get_db()
-    if user_id in active_sessions:
-        log_action(session, user_id, "Logout", details={"session_token": active_sessions[user_id]})
-        del active_sessions[user_id]
-        return True
-    return False
+def logout(session_token):
+    """Logs out a user by removing their session token from Redis."""
+    redis_client.delete(SESSION_PREFIX + session_token)
+    return True
 
-def get_user_from_session(token):
-    session = get_db()
-    for user_id, sess_token in active_sessions.items():
-        if sess_token == token:
-            return fetch_user_by_id(session, user_id)
-    return None
+def get_active_sessions():
+    """Returns a list of currently logged-in usernames."""
+    sessions = []
+    for key in redis_client.scan_iter(SESSION_PREFIX + "*"):
+        username = redis_client.get(key)
+        if username:
+            sessions.append(username.decode())
+    return sessions

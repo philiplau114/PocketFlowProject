@@ -1,22 +1,31 @@
 import streamlit as st
-from db_models import User
+from db.db_models import User
 from db_utils import get_db, create_user, fetch_user_by_username
-from user_management.auth import login, logout, active_sessions
+from user_management.auth import login, logout, get_active_sessions
 from user_management.admin import approve_user, deny_user, change_role
 from user_management.audit import get_audit_log_for_user
+
 
 def registration_page():
     st.title("User Registration")
     username = st.text_input("Username")
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
+    open_router_api_key = st.text_input("OpenRouter API Key", type="password")  # <-- Add this field!
+
     if st.button("Register"):
         session = get_db()
         if fetch_user_by_username(session, username):
             st.error("Username already exists.")
         else:
             password_hash = User.hash_password(password)
-            user_id = create_user(session, username, email, password_hash)
+            user_id = create_user(
+                session,
+                username,
+                email,
+                password_hash,
+                open_router_api_key=open_router_api_key  # <-- Pass this argument!
+            )
             st.success("Registration complete! Awaiting admin approval.")
 
 def login_page():
@@ -53,3 +62,26 @@ def audit_log_page():
         st.write(log)
 
 # In your Streamlit main app, import and call these functions as pages.
+# Add this at the bottom of streamlit_ui.py
+
+def main():
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio("Go to", [
+        "Register",
+        "Login",
+        "Admin Approval",
+        "Audit Log"
+    ])
+    if page == "Register":
+        registration_page()
+    elif page == "Login":
+        login_page()
+    elif page == "Admin Approval":
+        # You need to pass admin_id, e.g., from st.session_state or a test value
+        admin_id = st.session_state.get("admin_id", "admin_test")
+        admin_approval_page(admin_id)
+    elif page == "Audit Log":
+        audit_log_page()
+
+if __name__ == "__main__" or st.session_state.get("run_main", True):
+    main()
