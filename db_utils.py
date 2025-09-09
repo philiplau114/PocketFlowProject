@@ -211,6 +211,33 @@ def insert_artifact(session, task_id, artifact_type, file_name, file_path, file_
     session.add(artifact)
     session.commit()
 
+def store_set_file_summary(session, metric_id, summary_md):
+    """
+    Store or update a 'set_file_summary' artifact for the given metric_id in controller_artifacts using ORM.
+    Assumes uniqueness on (artifact_type, link_type, link_id).
+    """
+    # Try to find existing artifact
+    artifact = session.query(ControllerArtifact).filter_by(
+        artifact_type="set_file_summary",
+        link_type="test_metrics",
+        link_id=metric_id
+    ).first()
+    if artifact:
+        # Update the existing artifact
+        artifact.file_blob = summary_md.encode("utf-8")
+        artifact.file_name = f"set_file_summary_{metric_id}.md"
+    else:
+        # Create a new artifact
+        artifact = ControllerArtifact(
+            artifact_type="set_file_summary",
+            file_name=f"set_file_summary_{metric_id}.md",
+            file_blob=summary_md.encode("utf-8"),
+            link_type="test_metrics",
+            link_id=metric_id
+        )
+        session.add(artifact)
+    session.commit()
+
 # --- User Management & AuditLog helpers (SQLAlchemy ORM style) ---
 
 def fetch_user_by_username(session, username):

@@ -4,7 +4,6 @@ import sqlalchemy
 import sys
 import os
 from io import BytesIO
-from db_utils import get_db, store_set_file_summary
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
@@ -68,52 +67,6 @@ def load_artifacts_for_task(link_id):
             params=(link_id,)
         )
     return df
-
-def get_open_router_api_key():
-    # Try to get user's open_router_api_key from session or Redis
-    key = st.session_state.get("open_router_api_key")
-    if key:
-        return key
-    # If not in session, try to get from Redis using username
-    username = st.session_state.get("username")
-    if username:
-        val = r.get(f"user:{username}:open_router_api_key")
-        if val:
-            return val
-    return None
-
-def call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key):
-    # Compose the prompt markdown using the template in explain_set.md
-    # For simplicity, assume explain_set.md is in the same directory
-    with open(os.path.join(os.path.dirname(__file__), "explain_set.md"), "r") as f:
-        prompt_template = f.read()
-    set_file_str = set_file_blob.decode() if isinstance(set_file_blob, bytes) else set_file_blob
-    summary_csv_str = summary_metrics_blob.decode() if isinstance(summary_metrics_blob, bytes) else summary_metrics_blob
-    prompt = prompt_template.replace("Here is the .set file:", f"Here is the .set file:\n\n{set_file_str}\n\n")
-    prompt = prompt.replace("And here is the backtest summary (.csv):", f"And here is the backtest summary (.csv):\n\n{summary_csv_str}\n\n")
-    # Call OpenRouter API
-    import requests
-    headers = {
-        "Authorization": f"Bearer {user_api_key}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "gpt-4o",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }
-    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-    if response.status_code == 200:
-        result = response.json()
-        # Extract AI response (assume OpenRouter compatible with OpenAI schema)
-        try:
-            ai_content = result["choices"][0]["message"]["content"]
-        except Exception:
-            ai_content = "Failed to parse AI response."
-        return ai_content
-    else:
-        return f"Error from OpenRouter: {response.status_code} - {response.text}"
 
 # --- UI Layout ---
 st.set_page_config(page_title="Strategy Dashboard", layout="wide")
@@ -224,6 +177,7 @@ with col2:
         st.markdown(f"**Criteria Status:** {'✅' if strategy['status'] else '❌'} {strategy['criteria_reason']}")
 
         # --- Artifact Download and Graph ---
+        # Use the metric_id (not task_id/controller_task_id) to fetch correct artifacts
         artifacts = load_artifacts_for_task(int(strategy["metric_id"]))
 
         # Flexible set file pick
@@ -269,60 +223,13 @@ with col2:
         else:
             st.info("No equity curve available.")
 
-        # --- Set File Summary / AI Set Summary Button Logic ---
-        set_file_summary_row = artifacts[artifacts["artifact_type"] == "set_file_summary"]
-        # Determine if summary is already generated or just generated this session
-        summary_shown_key = f"ai_summary_shown_{strategy['metric_id']}"
-        summary_md = None
-        if not set_file_summary_row.empty:
-            summary_md = set_file_summary_row.iloc[0]["file_blob"]
-            if isinstance(summary_md, bytes):
-                summary_md = summary_md.decode()
-            # Mark as shown in session state to disable button
-            st.session_state[summary_shown_key] = True
-            st.markdown("### AI Set File Summary")
-            st.markdown(summary_md, unsafe_allow_html=True)
-        else:
-            # If just generated this session, get it from session and show
-            if st.session_state.get(summary_shown_key, False) and st.session_state.get(f"last_ai_summary_{strategy['metric_id']}", None):
-                summary_md = st.session_state[f"last_ai_summary_{strategy['metric_id']}"]
-                st.markdown("### AI Set File Summary")
-                st.markdown(summary_md, unsafe_allow_html=True)
-
-        # Button logic (disable if summary shown)
-        user_api_key = get_open_router_api_key()
-        output_set_row = artifacts[artifacts["artifact_type"] == "output_set"]
-        summary_metrics_csv_row = artifacts[artifacts["artifact_type"] == "summary_metrics_csv"]
-        enable_button = user_api_key and not output_set_row.empty and not summary_metrics_csv_row.empty
-        disable_btn = st.session_state.get(summary_shown_key, False)
-        btn = st.button(
-            "Generate AI Set Summary",
-            disabled=not enable_button or disable_btn,
-            key=f"gen_ai_summary_btn_{strategy['metric_id']}"
-        )
-        if not enable_button:
-            st.info("To enable: store your OpenRouter API key in your profile and make sure output_set and summary_metrics_csv are available.")
-
-        # Button click logic - only runs if not disabled
-        if btn and enable_button and not disable_btn:
-            with st.spinner("Generating AI summary via OpenRouter..."):
-                set_file_blob = output_set_row.iloc[0]["file_blob"]
-                summary_metrics_blob = summary_metrics_csv_row.iloc[0]["file_blob"]
-                ai_summary = call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key)
-                if ai_summary:
-                    session = get_db()
-                    try:
-                        store_set_file_summary(session, int(strategy["metric_id"]), ai_summary)
-                        st.success("Set file summary saved!")
-                        # Mark as shown and store last summary in session state
-                        st.session_state[summary_shown_key] = True
-                        st.session_state[f"last_ai_summary_{strategy['metric_id']}"] = ai_summary
-                        st.markdown("### AI Set File Summary")
-                        st.markdown(ai_summary)
-                    except Exception as e:
-                        st.error(f"Failed to save summary: {e}")
-                else:
-                    st.error("Failed to generate AI Set File Summary.")
+        # --- Lot size recommendations (example static) ---
+        st.markdown("### AI Lot Size Recommendation")
+        lot1, lot2, lot3 = st.columns(3)
+        lot1.metric("Low Risk", "0.10 lots")
+        lot2.metric("Medium Risk", "0.05 lots")
+        lot3.metric("Full Risk", "0.20 lots")
+        st.success("Suggestion: Increase. Low drawdown indicates potential for higher lot sizes.")
 
     else:
         st.warning("No strategy data available.")

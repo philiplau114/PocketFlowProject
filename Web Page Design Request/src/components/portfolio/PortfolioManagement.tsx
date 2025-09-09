@@ -5,74 +5,112 @@ import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Badge } from '../ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
-import { Separator } from '../ui/separator';
+import { Textarea } from '../ui/textarea';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../ui/dialog';
 import { Alert, AlertDescription } from '../ui/alert';
-import { Slider } from '../ui/slider';
 import { Progress } from '../ui/progress';
+import { Checkbox } from '../ui/checkbox';
+import { toast } from 'sonner@2.0.3';
 import { 
   Briefcase, 
   Plus, 
   Minus, 
   Download, 
-  TrendingUp, 
-  AlertTriangle,
   BarChart3,
-  Target,
-  DollarSign,
-  Info
+  Info,
+  CheckCircle,
+  TrendingUp,
+  TrendingDown
 } from 'lucide-react';
 
-// Mock portfolio data
-const mockPortfolio = {
-  id: 1,
-  name: 'Conservative Growth Portfolio',
-  createdDate: '2024-01-15',
-  totalValue: 50000,
-  currentPL: 2850.75,
-  strategies: [
-    {
-      id: 1,
-      name: 'Momentum Scalper Pro',
-      symbol: 'EURUSD',
-      allocation: 40,
-      netProfit: 1520.30,
-      maxDD: -250.15,
-      lotSize: 0.04,
-      correlation: 0.15
-    },
-    {
-      id: 2,
-      name: 'Grid Master 2.0',
-      symbol: 'GBPUSD',
-      allocation: 35,
-      netProfit: 980.45,
-      maxDD: -180.25,
-      lotSize: 0.035,
-      correlation: 0.32
-    },
-    {
-      id: 3,
-      name: 'Trend Follower Elite',
-      symbol: 'USDJPY',
-      allocation: 25,
-      netProfit: 350.00,
-      maxDD: -120.50,
-      lotSize: 0.025,
-      correlation: -0.08
-    }
-  ]
-};
-
-const correlationMatrix = [
-  { pair: 'EURUSD-GBPUSD', correlation: 0.76, risk: 'high' },
-  { pair: 'EURUSD-USDJPY', correlation: -0.12, risk: 'low' },
-  { pair: 'GBPUSD-USDJPY', correlation: 0.23, risk: 'medium' }
+// Available strategies from Strategy Dashboard
+const availableStrategies = [
+  {
+    id: 1,
+    rank: 1,
+    name: 'Momentum Scalper Pro',
+    symbol: 'EURUSD',
+    netProfit: 25420.50,
+    maxDD: -1250.30,
+    totalTrades: 1247,
+    recoveryFactor: 20.33,
+    score: 92.5,
+    winRate: 68.5,
+    profitFactor: 1.85,
+    expectedPayoff: 20.40,
+    distance: 0.12,
+    status: 'active'
+  },
+  {
+    id: 2,
+    rank: 2,
+    name: 'Grid Master 2.0',
+    symbol: 'GBPUSD',
+    netProfit: 18750.25,
+    maxDD: -2100.75,
+    totalTrades: 892,
+    recoveryFactor: 8.93,
+    score: 87.2,
+    winRate: 72.1,
+    profitFactor: 1.67,
+    expectedPayoff: 21.03,
+    distance: 0.18,
+    status: 'active'
+  },
+  {
+    id: 3,
+    rank: 3,
+    name: 'Trend Follower Elite',
+    symbol: 'USDJPY',
+    netProfit: 15200.80,
+    maxDD: -3250.45,
+    totalTrades: 456,
+    recoveryFactor: 4.68,
+    score: 79.8,
+    winRate: 58.3,
+    profitFactor: 1.42,
+    expectedPayoff: 33.33,
+    distance: 0.25,
+    status: 'paused'
+  },
+  {
+    id: 4,
+    rank: 4,
+    name: 'Scalping Master',
+    symbol: 'XAUUSD',
+    netProfit: 12500.40,
+    maxDD: -1800.20,
+    totalTrades: 678,
+    recoveryFactor: 6.94,
+    score: 75.2,
+    winRate: 65.2,
+    profitFactor: 1.54,
+    expectedPayoff: 18.42,
+    distance: 0.30,
+    status: 'active'
+  }
 ];
 
+interface Portfolio {
+  id: number;
+  name: string;
+  description: string;
+  createdDate: string;
+  strategies: any[];
+}
+
 export function PortfolioManagement() {
-  const [portfolio, setPortfolio] = useState(mockPortfolio);
-  const [riskLevel, setRiskLevel] = useState([5]); // 1-10 scale
-  const [accountBalance, setAccountBalance] = useState(50000);
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
+  const [selectedPortfolio, setSelectedPortfolio] = useState<Portfolio | null>(null);
+  const [showCreatePortfolio, setShowCreatePortfolio] = useState(false);
+  const [showAddStrategy, setShowAddStrategy] = useState(false);
+  const [selectedStrategies, setSelectedStrategies] = useState<number[]>([]);
+
+  // Create portfolio form state
+  const [portfolioForm, setPortfolioForm] = useState({
+    name: '',
+    description: ''
+  });
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -89,25 +127,108 @@ export function PortfolioManagement() {
     return value >= 0 ? 'text-green-600' : 'text-red-600';
   };
 
-  const getCorrelationRisk = (risk: string) => {
-    const colors = {
-      low: 'text-green-600',
-      medium: 'text-yellow-600',
-      high: 'text-red-600'
+  const getStatusBadge = (status: string) => {
+    const variants = {
+      active: 'default',
+      paused: 'secondary',
+      stopped: 'destructive'
+    } as const;
+    
+    return <Badge variant={variants[status as keyof typeof variants] || 'default'}>{status}</Badge>;
+  };
+
+  const handleCreatePortfolio = () => {
+    if (!portfolioForm.name.trim()) {
+      toast.error('Portfolio name is required');
+      return;
+    }
+
+    const newPortfolio: Portfolio = {
+      id: Date.now(),
+      name: portfolioForm.name,
+      description: portfolioForm.description,
+      createdDate: new Date().toISOString().split('T')[0],
+      strategies: []
     };
-    return colors[risk as keyof typeof colors] || 'text-gray-600';
+
+    setPortfolios(prev => [...prev, newPortfolio]);
+    setSelectedPortfolio(newPortfolio);
+    setPortfolioForm({ name: '', description: '' });
+    setShowCreatePortfolio(false);
+    toast.success('Portfolio created successfully');
   };
 
-  const totalAllocation = portfolio.strategies.reduce((sum, strategy) => sum + strategy.allocation, 0);
-  const portfolioReturn = (portfolio.currentPL / portfolio.totalValue) * 100;
+  const handleAddStrategies = () => {
+    if (!selectedPortfolio || selectedStrategies.length === 0) {
+      toast.error('Please select at least one strategy');
+      return;
+    }
 
-  const monteCarloResults = {
-    expectedReturn: 12.5,
-    worstCase: -8.2,
-    bestCase: 28.7,
-    sharpeRatio: 1.45,
-    maxDrawdown: 15.3
+    const strategiesToAdd = availableStrategies.filter(strategy => 
+      selectedStrategies.includes(strategy.id) && 
+      !selectedPortfolio.strategies.some(existing => existing.id === strategy.id)
+    );
+
+    const updatedPortfolio = {
+      ...selectedPortfolio,
+      strategies: [...selectedPortfolio.strategies, ...strategiesToAdd]
+    };
+
+    setPortfolios(prev => prev.map(p => p.id === selectedPortfolio.id ? updatedPortfolio : p));
+    setSelectedPortfolio(updatedPortfolio);
+    setSelectedStrategies([]);
+    setShowAddStrategy(false);
+    toast.success(`Added ${strategiesToAdd.length} strategy(ies) to portfolio`);
   };
+
+  const handleRemoveStrategy = (strategyId: number) => {
+    if (!selectedPortfolio) return;
+
+    const updatedPortfolio = {
+      ...selectedPortfolio,
+      strategies: selectedPortfolio.strategies.filter(strategy => strategy.id !== strategyId)
+    };
+
+    setPortfolios(prev => prev.map(p => p.id === selectedPortfolio.id ? updatedPortfolio : p));
+    setSelectedPortfolio(updatedPortfolio);
+    toast.success('Strategy removed from portfolio');
+  };
+
+  const calculatePortfolioCorrelation = () => {
+    if (!selectedPortfolio || selectedPortfolio.strategies.length < 2) {
+      return { overallRisk: 'low', diversification: 'good', recommendation: 'Portfolio has good diversification.' };
+    }
+
+    // Simplified correlation calculation based on currency pairs
+    const currencies = selectedPortfolio.strategies.map(s => s.symbol);
+    const uniqueCurrencies = [...new Set(currencies.join('').split(/(?=[A-Z]{3})/))].filter(c => c.length === 3);
+    
+    // Calculate risk based on currency overlap
+    let riskScore = 0;
+    if (currencies.includes('EURUSD') && currencies.includes('GBPUSD')) riskScore += 0.4;
+    if (currencies.includes('EURUSD') && currencies.includes('EURGBP')) riskScore += 0.5;
+    if (currencies.includes('GBPUSD') && currencies.includes('EURGBP')) riskScore += 0.3;
+    
+    const diversificationScore = uniqueCurrencies.length / (currencies.length * 2);
+    
+    let overallRisk = 'low';
+    let diversification = 'excellent';
+    let recommendation = 'Portfolio has excellent diversification with low correlation risk.';
+    
+    if (riskScore > 0.3) {
+      overallRisk = 'high';
+      diversification = 'poor';
+      recommendation = 'High correlation detected. Consider adding strategies with different currency pairs for better diversification.';
+    } else if (riskScore > 0.1) {
+      overallRisk = 'medium';
+      diversification = 'moderate';
+      recommendation = 'Moderate correlation detected. Portfolio could benefit from additional diversification.';
+    }
+
+    return { overallRisk, diversification, recommendation };
+  };
+
+  const correlationAnalysis = calculatePortfolioCorrelation();
 
   return (
     <div className="space-y-6">
@@ -115,279 +236,310 @@ export function PortfolioManagement() {
         <h1 className="flex items-center gap-2">
           💼 Portfolio Management
         </h1>
-        <Button>
-          <Plus className="h-4 w-4 mr-2" />
-          Add Strategy
-        </Button>
-      </div>
-
-      {/* Portfolio Summary */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center justify-between">
-            {portfolio.name}
-            <Badge variant="secondary">Created {portfolio.createdDate}</Badge>
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid md:grid-cols-4 gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <DollarSign className="h-4 w-4 text-blue-600" />
-                <span className="text-sm font-medium">Total Value</span>
-              </div>
-              <p className="text-2xl font-bold">{formatCurrency(portfolio.totalValue)}</p>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-4 w-4 text-green-600" />
-                <span className="text-sm font-medium">Current P&L</span>
-              </div>
-              <p className={`text-2xl font-bold ${getProfitColor(portfolio.currentPL)}`}>
-                {formatCurrency(portfolio.currentPL)}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <Target className="h-4 w-4 text-purple-600" />
-                <span className="text-sm font-medium">Return</span>
-              </div>
-              <p className={`text-2xl font-bold ${getProfitColor(portfolioReturn)}`}>
-                {formatPercent(portfolioReturn)}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <BarChart3 className="h-4 w-4 text-orange-600" />
-                <span className="text-sm font-medium">Strategies</span>
-              </div>
-              <p className="text-2xl font-bold">{portfolio.strategies.length}</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Portfolio Strategies */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Portfolio Strategies</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {portfolio.strategies.map((strategy) => (
-                <div key={strategy.id} className="border rounded-lg p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h4 className="font-medium">{strategy.name}</h4>
-                    <div className="flex items-center gap-2">
-                      <Button variant="ghost" size="sm">
-                        <Download className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="sm">
-                        <Minus className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                  
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="text-muted-foreground">Symbol:</span>
-                      <span className="ml-2 font-medium">{strategy.symbol}</span>
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Allocation:</span>
-                      <span className="ml-2 font-medium">{strategy.allocation}%</span>
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Net Profit:</span>
-                      <span className={`ml-2 font-medium ${getProfitColor(strategy.netProfit)}`}>
-                        {formatCurrency(strategy.netProfit)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Lot Size:</span>
-                      <span className="ml-2 font-medium">{strategy.lotSize}</span>
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span>Allocation</span>
-                      <span>{strategy.allocation}%</span>
-                    </div>
-                    <Progress value={strategy.allocation} className="h-2" />
-                  </div>
-                </div>
-              ))}
-              
-              <div className="border-t pt-4">
-                <div className="flex justify-between items-center">
-                  <span className="font-medium">Total Allocation</span>
-                  <span className={`font-bold ${totalAllocation === 100 ? 'text-green-600' : 'text-red-600'}`}>
-                    {totalAllocation}%
-                  </span>
-                </div>
-                {totalAllocation !== 100 && (
-                  <Alert className="mt-2">
-                    <AlertTriangle className="h-4 w-4" />
-                    <AlertDescription>
-                      Portfolio allocation should total 100%. Currently {totalAllocation}%.
-                    </AlertDescription>
-                  </Alert>
-                )}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Currency Correlation Assessment */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Currency Correlation Assessment</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Currency Pair</TableHead>
-                    <TableHead>Correlation</TableHead>
-                    <TableHead>Risk</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {correlationMatrix.map((item, index) => (
-                    <TableRow key={index}>
-                      <TableCell className="font-medium">{item.pair}</TableCell>
-                      <TableCell>{item.correlation}</TableCell>
-                      <TableCell>
-                        <Badge 
-                          variant={item.risk === 'high' ? 'destructive' : item.risk === 'medium' ? 'secondary' : 'default'}
-                        >
-                          {item.risk}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-
-              <Alert>
-                <Info className="h-4 w-4" />
-                <AlertDescription>
-                  High correlation between EURUSD and GBPUSD increases portfolio risk. Consider rebalancing for better diversification.
-                </AlertDescription>
-              </Alert>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Position Sizing */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Position Sizing & Risk Management</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="account-balance">Account Balance</Label>
-              <Input
-                id="account-balance"
-                type="number"
-                value={accountBalance}
-                onChange={(e) => setAccountBalance(Number(e.target.value))}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Risk Level: {riskLevel[0]}/10</Label>
-              <Slider
-                value={riskLevel}
-                onValueChange={setRiskLevel}
-                max={10}
-                min={1}
-                step={1}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xs text-muted-foreground">
-                <span>Conservative</span>
-                <span>Aggressive</span>
-              </div>
-            </div>
-
-            <Separator />
-
-            <div className="space-y-3">
-              <h4 className="font-medium">Recommended Position Sizes</h4>
-              {portfolio.strategies.map((strategy) => (
-                <div key={strategy.id} className="flex justify-between items-center">
-                  <span className="text-sm">{strategy.symbol}</span>
-                  <span className="font-medium">
-                    {(strategy.lotSize * (riskLevel[0] / 5)).toFixed(3)} lots
-                  </span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Monte Carlo Risk Assessment */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Monte Carlo Risk Assessment</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <span className="text-sm text-muted-foreground">Expected Return</span>
-                <p className="text-lg font-bold text-green-600">{formatPercent(monteCarloResults.expectedReturn)}</p>
-              </div>
-              <div className="space-y-1">
-                <span className="text-sm text-muted-foreground">Worst Case</span>
-                <p className="text-lg font-bold text-red-600">{formatPercent(monteCarloResults.worstCase)}</p>
-              </div>
-              <div className="space-y-1">
-                <span className="text-sm text-muted-foreground">Best Case</span>
-                <p className="text-lg font-bold text-green-600">{formatPercent(monteCarloResults.bestCase)}</p>
-              </div>
-              <div className="space-y-1">
-                <span className="text-sm text-muted-foreground">Sharpe Ratio</span>
-                <p className="text-lg font-bold">{monteCarloResults.sharpeRatio}</p>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex justify-between text-sm">
-                <span>Max Expected Drawdown</span>
-                <span>{formatPercent(monteCarloResults.maxDrawdown)}</span>
-              </div>
-              <Progress value={monteCarloResults.maxDrawdown} className="h-2" />
-            </div>
-
-            <div className="bg-muted rounded-lg p-4 text-center">
-              <BarChart3 className="h-16 w-16 mx-auto text-muted-foreground mb-2" />
-              <p className="text-sm text-muted-foreground">Monte Carlo simulation chart would appear here</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Export Portfolio */}
-      <Card>
-        <CardContent className="pt-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-medium">Export Portfolio Report</h3>
-              <p className="text-sm text-muted-foreground">
-                Download a comprehensive analysis of your portfolio performance and risk metrics
-              </p>
-            </div>
+        <Dialog open={showCreatePortfolio} onOpenChange={setShowCreatePortfolio}>
+          <DialogTrigger asChild>
             <Button>
-              <Download className="h-4 w-4 mr-2" />
-              Export Report
+              <Plus className="h-4 w-4 mr-2" />
+              Create Portfolio
             </Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Create New Portfolio</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="portfolio-name">Portfolio Name</Label>
+                <Input
+                  id="portfolio-name"
+                  value={portfolioForm.name}
+                  onChange={(e) => setPortfolioForm(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="Enter portfolio name"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="portfolio-description">Description</Label>
+                <Textarea
+                  id="portfolio-description"
+                  value={portfolioForm.description}
+                  onChange={(e) => setPortfolioForm(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="Enter portfolio description"
+                  rows={3}
+                />
+              </div>
+              <div className="flex justify-end space-x-2">
+                <Button variant="outline" onClick={() => setShowCreatePortfolio(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleCreatePortfolio}>
+                  Create Portfolio
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      </div>
+
+      {/* Portfolio Selection */}
+      {portfolios.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Your Portfolios</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {portfolios.map((portfolio) => (
+                <Card 
+                  key={portfolio.id} 
+                  className={`cursor-pointer transition-colors ${selectedPortfolio?.id === portfolio.id ? 'ring-2 ring-primary' : ''}`}
+                  onClick={() => setSelectedPortfolio(portfolio)}
+                >
+                  <CardContent className="pt-4">
+                    <div className="space-y-2">
+                      <h4 className="font-medium">{portfolio.name}</h4>
+                      <p className="text-sm text-muted-foreground">{portfolio.description}</p>
+                      <div className="flex justify-between text-xs text-muted-foreground">
+                        <span>Created: {portfolio.createdDate}</span>
+                        <span>{portfolio.strategies.length} strategies</span>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* No Portfolio Selected */}
+      {portfolios.length === 0 && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-center space-y-4">
+              <Briefcase className="h-16 w-16 mx-auto text-muted-foreground" />
+              <div>
+                <h3 className="font-medium">No Portfolios Created</h3>
+                <p className="text-sm text-muted-foreground">
+                  Create your first portfolio to start managing your trading strategies
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Selected Portfolio Details */}
+      {selectedPortfolio && (
+        <>
+          {/* Portfolio Summary */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                {selectedPortfolio.name}
+                <Badge variant="secondary">Created {selectedPortfolio.createdDate}</Badge>
+              </CardTitle>
+              {selectedPortfolio.description && (
+                <p className="text-sm text-muted-foreground">{selectedPortfolio.description}</p>
+              )}
+            </CardHeader>
+            <CardContent>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <BarChart3 className="h-4 w-4 text-orange-600" />
+                    <span className="text-sm font-medium">Strategies</span>
+                  </div>
+                  <p className="text-2xl font-bold">{selectedPortfolio.strategies.length}</p>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="h-4 w-4 text-green-600" />
+                    <span className="text-sm font-medium">Diversification</span>
+                  </div>
+                  <p className="text-2xl font-bold capitalize">{correlationAnalysis.diversification}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            {/* Portfolio Strategies */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                  Portfolio Strategies
+                  <Dialog open={showAddStrategy} onOpenChange={setShowAddStrategy}>
+                    <DialogTrigger asChild>
+                      <Button size="sm">
+                        <Plus className="h-4 w-4 mr-2" />
+                        Add Strategy
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-4xl">
+                      <DialogHeader>
+                        <DialogTitle>Add Strategies to Portfolio</DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-4">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Select</TableHead>
+                              <TableHead>Rank</TableHead>
+                              <TableHead>Strategy</TableHead>
+                              <TableHead>Symbol</TableHead>
+                              <TableHead>Score</TableHead>
+                              <TableHead>Win Rate</TableHead>
+                              <TableHead>Status</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {availableStrategies
+                              .filter(strategy => !selectedPortfolio.strategies.some(existing => existing.id === strategy.id))
+                              .map((strategy) => (
+                              <TableRow key={strategy.id}>
+                                <TableCell>
+                                  <Checkbox
+                                    checked={selectedStrategies.includes(strategy.id)}
+                                    onCheckedChange={(checked) => {
+                                      if (checked) {
+                                        setSelectedStrategies(prev => [...prev, strategy.id]);
+                                      } else {
+                                        setSelectedStrategies(prev => prev.filter(id => id !== strategy.id));
+                                      }
+                                    }}
+                                  />
+                                </TableCell>
+                                <TableCell>#{strategy.rank}</TableCell>
+                                <TableCell className="font-medium">{strategy.name}</TableCell>
+                                <TableCell>{strategy.symbol}</TableCell>
+                                <TableCell>{strategy.score}</TableCell>
+                                <TableCell>{formatPercent(strategy.winRate)}</TableCell>
+                                <TableCell>{getStatusBadge(strategy.status)}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                        <div className="flex justify-end space-x-2">
+                          <Button variant="outline" onClick={() => setShowAddStrategy(false)}>
+                            Cancel
+                          </Button>
+                          <Button onClick={handleAddStrategies}>
+                            Add Selected ({selectedStrategies.length})
+                          </Button>
+                        </div>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {selectedPortfolio.strategies.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Strategy</TableHead>
+                        <TableHead>Symbol</TableHead>
+                        <TableHead>Score</TableHead>
+                        <TableHead>Win Rate</TableHead>
+                        <TableHead>Max DD</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {selectedPortfolio.strategies.map((strategy) => (
+                        <TableRow key={strategy.id}>
+                          <TableCell className="font-medium">{strategy.name}</TableCell>
+                          <TableCell>{strategy.symbol}</TableCell>
+                          <TableCell>{strategy.score}</TableCell>
+                          <TableCell>{formatPercent(strategy.winRate)}</TableCell>
+                          <TableCell className={getProfitColor(strategy.maxDD)}>
+                            {formatCurrency(strategy.maxDD)}
+                          </TableCell>
+                          <TableCell>{getStatusBadge(strategy.status)}</TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <Button variant="ghost" size="sm">
+                                <Download className="h-4 w-4" />
+                              </Button>
+                              <Button 
+                                variant="ghost" 
+                                size="sm"
+                                onClick={() => handleRemoveStrategy(strategy.id)}
+                              >
+                                <Minus className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <div className="text-center py-8">
+                    <BarChart3 className="h-12 w-12 mx-auto text-muted-foreground mb-2" />
+                    <p className="text-sm text-muted-foreground">
+                      No strategies added yet. Click "Add Strategy" to get started.
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Portfolio Correlation Assessment */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Portfolio Correlation Assessment</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">Overall Risk</span>
+                    <div className="flex items-center gap-2">
+                      <div className={`w-3 h-3 rounded-full ${
+                        correlationAnalysis.overallRisk === 'high' ? 'bg-red-500' :
+                        correlationAnalysis.overallRisk === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
+                      }`} />
+                      <span className="font-medium capitalize">{correlationAnalysis.overallRisk}</span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">Diversification</span>
+                    <div className="flex items-center gap-2">
+                      <div className={`w-3 h-3 rounded-full ${
+                        correlationAnalysis.diversification === 'poor' ? 'bg-red-500' :
+                        correlationAnalysis.diversification === 'moderate' ? 'bg-yellow-500' : 'bg-green-500'
+                      }`} />
+                      <span className="font-medium capitalize">{correlationAnalysis.diversification}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {selectedPortfolio.strategies.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium">Currency Exposure</span>
+                    <div className="space-y-1">
+                      {[...new Set(selectedPortfolio.strategies.map(s => s.symbol))].map(symbol => (
+                        <div key={symbol} className="flex justify-between text-sm">
+                          <span>{symbol}</span>
+                          <span>{selectedPortfolio.strategies.filter(s => s.symbol === symbol).length} strategy(ies)</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <Alert>
+                  <Info className="h-4 w-4" />
+                  <AlertDescription>
+                    {correlationAnalysis.recommendation}
+                  </AlertDescription>
+                </Alert>
+              </CardContent>
+            </Card>
           </div>
-        </CardContent>
-      </Card>
+        </>
+      )}
 
       <div className="text-center text-sm text-muted-foreground">
         Risk Disclaimer: Trading involves substantial risk and may result in losses. Past performance does not guarantee future results.

@@ -78,11 +78,14 @@
   :root, :host {
     --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    --color-red-500: oklch(.637 .237 25.331);
     --color-red-600: oklch(.577 .245 27.325);
     --color-orange-600: oklch(.646 .222 41.116);
     --color-yellow-50: oklch(.987 .026 102.212);
+    --color-yellow-500: oklch(.795 .184 86.047);
     --color-yellow-600: oklch(.681 .162 75.834);
     --color-yellow-900: oklch(.421 .095 57.708);
+    --color-green-500: oklch(.723 .219 149.579);
     --color-green-600: oklch(.627 .194 149.214);
     --color-green-700: oklch(.527 .154 150.069);
     --color-blue-50: oklch(.97 .014 254.604);
@@ -91,7 +94,6 @@
     --color-indigo-600: oklch(.511 .262 276.966);
     --color-purple-600: oklch(.558 .288 302.321);
     --color-gray-100: oklch(.967 .003 264.542);
-    --color-gray-600: oklch(.446 .03 256.802);
     --color-black: #000;
     --color-white: #fff;
     --spacing: .25rem;
@@ -686,10 +688,6 @@
     margin-right: calc(var(--spacing) * 2);
   }
 
-  .mb-1 {
-    margin-bottom: calc(var(--spacing) * 1);
-  }
-
   .mb-2 {
     margin-bottom: calc(var(--spacing) * 2);
   }
@@ -712,10 +710,6 @@
 
   .ml-1 {
     margin-left: calc(var(--spacing) * 1);
-  }
-
-  .ml-2 {
-    margin-left: calc(var(--spacing) * 2);
   }
 
   .ml-auto {
@@ -841,6 +835,10 @@
 
   .h-2\.5 {
     height: calc(var(--spacing) * 2.5);
+  }
+
+  .h-3 {
+    height: calc(var(--spacing) * 3);
   }
 
   .h-4 {
@@ -997,6 +995,10 @@
 
   .w-9 {
     width: calc(var(--spacing) * 9);
+  }
+
+  .w-12 {
+    width: calc(var(--spacing) * 12);
   }
 
   .w-16 {
@@ -1311,6 +1313,10 @@
     justify-content: center;
   }
 
+  .justify-end {
+    justify-content: flex-end;
+  }
+
   .justify-start {
     justify-content: flex-start;
   }
@@ -1602,6 +1608,10 @@
     background-color: var(--color-gray-100);
   }
 
+  .bg-green-500 {
+    background-color: var(--color-green-500);
+  }
+
   .bg-green-600 {
     background-color: var(--color-green-600);
   }
@@ -1642,6 +1652,10 @@
     }
   }
 
+  .bg-red-500 {
+    background-color: var(--color-red-500);
+  }
+
   .bg-secondary {
     background-color: var(--secondary);
   }
@@ -1660,6 +1674,10 @@
 
   .bg-yellow-50 {
     background-color: var(--color-yellow-50);
+  }
+
+  .bg-yellow-500 {
+    background-color: var(--color-yellow-500);
   }
 
   .bg-gradient-to-br {
@@ -1771,6 +1789,10 @@
 
   .py-6 {
     padding-block: calc(var(--spacing) * 6);
+  }
+
+  .py-8 {
+    padding-block: calc(var(--spacing) * 8);
   }
 
   .pt-0 {
@@ -1950,10 +1972,6 @@
     color: var(--foreground);
   }
 
-  .text-gray-600 {
-    color: var(--color-gray-600);
-  }
-
   .text-green-600 {
     color: var(--color-green-600);
   }
@@ -2016,6 +2034,10 @@
     color: var(--color-yellow-600);
   }
 
+  .capitalize {
+    text-transform: capitalize;
+  }
+
   .tabular-nums {
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal, ) var(--tw-slashed-zero, ) var(--tw-numeric-figure, ) var(--tw-numeric-spacing, ) var(--tw-numeric-fraction, );
@@ -2076,6 +2098,15 @@
   .ring-0 {
     --tw-ring-shadow: var(--tw-ring-inset, ) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+
+  .ring-2 {
+    --tw-ring-shadow: var(--tw-ring-inset, ) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+
+  .ring-primary {
+    --tw-ring-color: var(--primary);
   }
 
   .ring-ring\/50 {
@@ -3703,12 +3734,6 @@
   @media (width >= 48rem) {
     .md\:grid-cols-3 {
       grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-  }
-
-  @media (width >= 48rem) {
-    .md\:grid-cols-4 {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
     }
   }
 

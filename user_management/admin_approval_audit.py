@@ -60,12 +60,12 @@ if pending_users:
                 update_user_status(db_session, user.id, "Approved", approved_by=admin_user.id)
                 log_action(db_session, admin_user.id, "User Approved", target_id=user.id)
                 st.success(f"{user.username} approved.")
-                st.experimental_rerun()
+                st.rerun()
             if deny_btn.button("Deny", key=f"deny_{user.id}"):
                 update_user_status(db_session, user.id, "Denied", approved_by=admin_user.id)
                 log_action(db_session, admin_user.id, "User Denied", target_id=user.id)
                 st.warning(f"{user.username} denied.")
-                st.experimental_rerun()
+                st.rerun()
 else:
     st.info("No pending users for approval.")
 

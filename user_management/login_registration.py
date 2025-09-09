@@ -29,7 +29,7 @@ def login_backend(username, password):
         return None, "Incorrect password"
     session_token = str(uuid.uuid4())
     redis_client.setex(SESSION_PREFIX + session_token, 86400, username)
-    return session_token, None
+    return session_token, user  # Return both token and user object
 
 def register_backend(username, email, password, api_key):
     db_session = get_db()
@@ -60,13 +60,21 @@ with tab_login:
     login_submit = login_form.form_submit_button("Login")
 
     if login_submit:
-        session_token, error = login_backend(username, password)
-        if session_token:
+        session_token, user_or_error = login_backend(username, password)
+        if session_token and user_or_error:
+            user = user_or_error
             st.session_state["session_token"] = session_token
+            st.session_state["username"] = user.username
+            st.session_state["user_role"] = user.role  # Set role for main.py sidebar
+            st.session_state["open_router_api_key"] = user.open_router_api_key
             st.success("Login successful!")
-            st.info("Your account is awaiting admin approval." if get_user_by_token(session_token).status != "Approved" else "You are logged in.")
+            if user.status != "Approved":
+                st.info("Your account is awaiting admin approval.")
+            else:
+                st.info("You are logged in.")
+            st.rerun()  # <<< Force rerun so main.py shows sidebar
         else:
-            st.error(error)
+            st.error(user_or_error if isinstance(user_or_error, str) else "Login failed.")
 
 with tab_register:
     st.subheader("Register")
@@ -87,13 +95,19 @@ with tab_register:
 # --- Show session info if logged in ---
 if "session_token" in st.session_state:
     user = get_user_by_token(st.session_state["session_token"])
+    # Sync username and user_role into session_state for proper sidebar logic
     if user:
+        st.session_state["username"] = user.username
+        st.session_state["user_role"] = user.role
         st.info(f"Logged in as: {user.username} | Role: {user.role} | Status: {user.status}")
         logout_btn = st.button("Logout")
         if logout_btn:
             redis_client.delete(SESSION_PREFIX + st.session_state["session_token"])
             st.session_state.pop("session_token")
+            st.session_state.pop("username", None)
+            st.session_state.pop("user_role", None)
             st.success("Logged out successfully!")
+            st.experimental_rerun()  # Rerun so main.py shows only login/register
 
 st.markdown("""
 <div style='text-align: center; color: #999; margin-top:2em'>
