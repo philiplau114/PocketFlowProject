@@ -1,13 +1,14 @@
 import os
 import sys
 from sqlalchemy import create_engine, and_
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, joinedload
+import pandas as pd
 from datetime import datetime, timedelta
 from db.db_models import (
     Base, ControllerJob, ControllerTask, ControllerAttempt, ControllerAISuggestion,
     OptimizationSection, OptimizationParameter, ControllerArtifact, ControllerTaskLog,
-    TestMetric, SetFile, Portfolio, PositionSizingResult, TradeRecord,
-    User, AuditLog  # <-- Ensure these are in db_models.py
+    TestMetric, SetFile, Portfolio, PortfolioSet, PositionSizingResult, TradeRecord,
+    User, AuditLog
 )
 from db.status_constants import (
     JOB_STATUS_NEW, JOB_STATUS_QUEUED, JOB_STATUS_IN_PROGRESS,
@@ -38,7 +39,6 @@ def extract_setfile_metadata(setfile_path):
         "ea_name": fields.get("EA", ""),
         "symbol": fields.get("Symbol", ""),
         "timeframe": fields.get("Timeframe", ""),
-        # Optionally add more fields...
     }
 
 # --- Existing job/task helpers unchanged ---
@@ -212,22 +212,15 @@ def insert_artifact(session, task_id, artifact_type, file_name, file_path, file_
     session.commit()
 
 def store_set_file_summary(session, metric_id, summary_md):
-    """
-    Store or update a 'set_file_summary' artifact for the given metric_id in controller_artifacts using ORM.
-    Assumes uniqueness on (artifact_type, link_type, link_id).
-    """
-    # Try to find existing artifact
     artifact = session.query(ControllerArtifact).filter_by(
         artifact_type="set_file_summary",
         link_type="test_metrics",
         link_id=metric_id
     ).first()
     if artifact:
-        # Update the existing artifact
         artifact.file_blob = summary_md.encode("utf-8")
         artifact.file_name = f"set_file_summary_{metric_id}.md"
     else:
-        # Create a new artifact
         artifact = ControllerArtifact(
             artifact_type="set_file_summary",
             file_name=f"set_file_summary_{metric_id}.md",
@@ -257,6 +250,7 @@ def set_open_router_api_key(db_session, username, api_key):
 def get_open_router_api_key(db_session, username):
     user = db_session.query(User).filter_by(username=username).first()
     return user.open_router_api_key if user else None
+
 def create_user(session, username, email, password_hash, open_router_api_key=None):
     user = User(
         username=username,
@@ -303,3 +297,153 @@ def get_audit_log(session, user_id=None, limit=100):
     if user_id:
         query = query.filter(AuditLog.user_id == user_id)
     return query.limit(limit).all()
+
+# --- Portfolio Management ORM functions ---
+
+def get_user_portfolios(session, username):
+    """Return all portfolios for a user. Here we match by portfolio_name prefix; adjust if you store user_id or username in another field."""
+    return session.query(Portfolio).filter(Portfolio.portfolio_name.like(f"{username}%")).all()
+
+def create_portfolio(session, username, portfolio_name, description=""):
+    """Create a new portfolio for user."""
+    new_portfolio = Portfolio(
+        portfolio_name=portfolio_name,
+        description=description,
+        meta_json=None
+    )
+    session.add(new_portfolio)
+    session.commit()
+    return new_portfolio
+
+def get_portfolio_strategies(session, portfolio_id):
+    """
+    Returns a pandas DataFrame of strategies in given portfolio,
+    using v_test_metrics_scored for scored fields.
+    """
+    sql = text("""
+        SELECT
+            v.id AS metric_id,
+            v.set_file_name,
+            v.symbol,
+            v.net_profit,
+            v.weighted_score,
+            v.win_rate,
+            v.normalized_total_distance_to_good
+        FROM Portfolio_Sets ps
+        JOIN v_test_metrics_scored v ON ps.test_metrics_id = v.id
+        WHERE ps.portfolio_id = :portfolio_id
+        ORDER BY v.normalized_total_distance_to_good ASC, v.weighted_score DESC
+    """)
+    result = session.execute(sql, {"portfolio_id": portfolio_id})
+    rows = result.fetchall()
+    df = pd.DataFrame(rows, columns=[
+        "metric_id",
+        "set_file_name",
+        "symbol",
+        "net_profit",
+        "weighted_score",
+        "win_rate",
+        "normalized_total_distance_to_good"
+    ])
+    return df
+
+def add_strategy_to_portfolio(session, portfolio_id, metric_id):
+    """Add a strategy to a portfolio."""
+    ps = PortfolioSet(portfolio_id=portfolio_id, test_metrics_id=metric_id)
+    session.add(ps)
+    session.commit()
+    return True
+
+def remove_strategy_from_portfolio(session, portfolio_id, metric_id):
+    """Remove a strategy from a portfolio."""
+    ps = session.query(PortfolioSet).filter_by(portfolio_id=portfolio_id, test_metrics_id=metric_id).first()
+    if ps:
+        session.delete(ps)
+        session.commit()
+        return True
+    return False
+
+from sqlalchemy import text
+
+def load_available_strategies(session):
+    """
+    Returns a pandas DataFrame of strategies from v_test_metrics_scored,
+    ordered by normalized_total_distance_to_good ASC, weighted_score DESC.
+    """
+    sql = text("""
+        SELECT
+            id,
+            set_file_name,
+            symbol,
+            net_profit,
+            weighted_score,
+            win_rate,
+            normalized_total_distance_to_good
+        FROM v_test_metrics_scored
+        ORDER BY normalized_total_distance_to_good ASC, weighted_score DESC
+    """)
+    result = session.execute(sql)
+    rows = result.fetchall()
+    df = pd.DataFrame(rows, columns=[
+        "metric_id",
+        "set_file_name",
+        "symbol",
+        "net_profit",
+        "weighted_score",
+        "win_rate",
+        "normalized_total_distance_to_good"
+    ])
+    return df
+
+def get_portfolio_symbols(session, portfolio_id):
+    """
+    Returns a list of symbols in the portfolio.
+    """
+    sql = text("""
+        SELECT DISTINCT v.symbol
+        FROM Portfolio_Sets ps
+        JOIN v_test_metrics_scored v ON ps.test_metrics_id = v.id
+        WHERE ps.portfolio_id = :portfolio_id
+    """)
+    rows = session.execute(sql, {"portfolio_id": portfolio_id}).fetchall()
+    return [row[0] for row in rows]
+
+def get_portfolio_currency_correlation(session, portfolio_id, timeframe='H1'):
+    """
+    Returns a DataFrame of pairwise currency correlations for the given portfolio.
+    """
+    symbols = get_portfolio_symbols(session, portfolio_id)
+    if not symbols:
+        return pd.DataFrame(columns=["symbol1", "symbol2", "correlation"])
+    # Compose tuple for SQL "IN"
+    symbol_tuple = tuple(symbols)
+    # SQLAlchemy requires special syntax for tuple in IN clause
+    placeholders = ','.join([':s'+str(i) for i in range(len(symbol_tuple))])
+    params = {f's{i}': symbol for i, symbol in enumerate(symbol_tuple)}
+    params.update({'tf': timeframe})
+    sql = text(f"""
+        SELECT symbol1, symbol2, correlation
+        FROM Correlation_Matrix
+        WHERE timeframe = :tf
+        AND symbol1 IN ({placeholders}) AND symbol2 IN ({placeholders})
+    """)
+    # Pass params twice for both symbol1 and symbol2
+    result = session.execute(sql, params)
+    rows = result.fetchall()
+    return pd.DataFrame(rows, columns=["symbol1", "symbol2", "correlation"])
+
+def aggregate_correlation(df):
+    """
+    Aggregates the correlation DataFrame to summarize risk:
+    - Returns average, max, and identifies highly correlated pairs (> 0.7).
+    """
+    if df.empty:
+        return {'average_correlation': None, 'max_correlation': None, 'high_corr_pairs': []}
+    avg_corr = df['correlation'].mean()
+    max_corr = df['correlation'].max()
+    high_corr_pairs = df[df['correlation'] > 0.7][['symbol1', 'symbol2', 'correlation']].values.tolist()
+    return {
+        'average_correlation': avg_corr,
+        'max_correlation': max_corr,
+        'high_corr_pairs': high_corr_pairs
+    }

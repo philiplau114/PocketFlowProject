@@ -1,9 +1,7 @@
 import sqlite3
 import pymysql
 import os
-
 from sqlalchemy.orm import sessionmaker
-
 from config import (
     AGENT_DB_PATH,
     MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
@@ -11,7 +9,7 @@ from config import (
 from sqlalchemy import create_engine, text
 from contextlib import contextmanager
 
-# Utility: SQLAlchemy session context for controller DB
+# Utility: SQLAlchemy session context for controller DB (used ONLY for linking step, not main inserts)
 @contextmanager
 def controller_db_session():
     engine = create_engine(
@@ -29,14 +27,8 @@ def controller_db_session():
         session.close()
         engine.dispose()
 
-def link_artifacts_to_test_metrics_for_task(session, controller_task_id):
-    """
-    For a specific controller_task_id, link controller_artifacts of type 'output_set'
-    to their corresponding test_metrics (by exact file_name match), but only update
-    if the link_id is missing or incorrect.
-    """
-    # Step 1: Find all candidate artifact/test_metrics pairs that should be linked
-    select_sql = text("""
+def link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id):
+    select_sql = """
         SELECT a.id AS artifact_id, t.id AS test_metrics_id, a.link_id
         FROM controller_artifacts a
         JOIN test_metrics t
@@ -44,32 +36,157 @@ def link_artifacts_to_test_metrics_for_task(session, controller_task_id):
           AND a.artifact_type = 'output_set'
           AND a.file_name = t.set_file_name
           AND a.file_blob IS NOT NULL
-        WHERE a.task_id = :controller_task_id
-    """)
-    results = session.execute(select_sql, {'controller_task_id': controller_task_id}).fetchall()
-
-    # Step 2: Update only if link_id is missing or incorrect
-    update_sql = text("""
+        WHERE a.task_id = %s
+    """
+    update_sql = """
         UPDATE controller_artifacts
-        SET link_type = 'test_metrics', link_id = :test_metrics_id
-        WHERE link_id = :link_id
-    """)
+        SET link_type = 'test_metrics', link_id = %s
+        WHERE link_id = %s
+    """
+    cursor = ctrl_conn.cursor()
+    cursor.execute(select_sql, (controller_task_id,))
+    results = cursor.fetchall()
     count = 0
     for artifact_id, test_metrics_id, link_id in results:
         if link_id != test_metrics_id:
-            session.execute(update_sql, {
-                'test_metrics_id': test_metrics_id,
-				'link_id': link_id
-            })
+            cursor.execute(update_sql, (test_metrics_id, link_id))
             count += 1
-    print(f"Linked {count} artifacts to test_metrics for controller_task_id={controller_task_id}")
+    print(f"[DEBUG] Linked {count} artifacts to test_metrics for controller_task_id={controller_task_id}")
+    cursor.close()
 
-def sync_test_metrics(worker_job_id):
+def sync_trade_records(step_id, test_metrics_id, ctrl_conn):
+    agent_sql = """
+    SELECT
+        o.order_id,
+        o.symbol,
+        o.open_time,
+        o.open_type,
+        o.open_price,
+        o.open_size,
+        o.open_sl,
+        o.open_tp,
+        c.close_time,
+        c.close_type,
+        c.close_price,
+        c.close_size,
+        c.close_sl,
+        c.close_tp,
+        c.profit,
+        c.balance_after_trade,
+        o.magic_number,
+        o.comment
+    FROM (
+        SELECT
+            t.order_id,
+            t.symbol,
+            t.time AS open_time,
+            t.type AS open_type,
+            t.price AS open_price,
+            t.size AS open_size,
+            t.sl AS open_sl,
+            t.tp AS open_tp,
+            t.magic_number,
+            t.comment,
+            t.step_id AS step_id
+        FROM
+            trades t
+        WHERE t.type IN ('buy', 'sell')
+          AND t.step_id = ?
+    ) o
+    JOIN (
+        SELECT
+            t.order_id,
+            t.time AS close_time,
+            t.type AS close_type,
+            t.price AS close_price,
+            t.size AS close_size,
+            t.sl AS close_sl,
+            t.tp AS close_tp,
+            t.profit,
+            t.balance AS balance_after_trade,
+            t.step_id AS step_id
+        FROM
+            trades t
+        WHERE t.type LIKE 'close%'
+          AND t.step_id = ?
+    ) c
+    ON o.step_id = c.step_id
+       AND o.order_id = c.order_id
+       AND o.open_time < c.close_time
     """
-    Sync test_metrics rows for a specific worker job from agent (SQLite) to controller (MySQL) db.
-    Args:
-        worker_job_id (int): The job.id (out_worker_JobId) to sync.
+    insert_sql = """
+    INSERT INTO trade_records (
+        test_metrics_id,
+        order_id,
+        symbol,
+        open_time,
+        open_type,
+        open_price,
+        open_size,
+        open_sl,
+        open_tp,
+        close_time,
+        close_type,
+        close_price,
+        close_size,
+        close_sl,
+        close_tp,
+        profit,
+        balance_after_trade,
+        magic_number,
+        comment
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
+    trade_record_columns = [
+        "order_id",
+        "symbol",
+        "open_time",
+        "open_type",
+        "open_price",
+        "open_size",
+        "open_sl",
+        "open_tp",
+        "close_time",
+        "close_type",
+        "close_price",
+        "close_size",
+        "close_sl",
+        "close_tp",
+        "profit",
+        "balance_after_trade",
+        "magic_number",
+        "comment"
+    ]
+    agent_conn = sqlite3.connect(AGENT_DB_PATH)
+    agent_conn.row_factory = sqlite3.Row
+    agent_cursor = agent_conn.cursor()
+    agent_cursor.execute(agent_sql, (step_id, step_id))
+    rows = agent_cursor.fetchall()
+    agent_cursor.close()
+    agent_conn.close()
+    if not rows:
+        print(f"[DEBUG] No trade_records for step_id {step_id}.")
+        return
+    ctrl_cursor = ctrl_conn.cursor()
+    print(f"[DEBUG] step_id {step_id} has {len(rows)} trade_records to sync.")
+    print(f"[DEBUG] test_metrics_id: {test_metrics_id}")
+    try:
+        for idx, row in enumerate(rows):
+            params = (test_metrics_id,) + tuple(row[col] for col in trade_record_columns)
+            print(f"[DEBUG] trade_records Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
+            if len(params) != 19:
+                print(f"[ERROR] trade_records Row {idx}: Mismatch! Param count: {len(params)}, Placeholders: 19.")
+            #print(f"[DEBUG] trade_records Row {idx}: Params: {params}, insert_sql: {insert_sql}")
+            ctrl_cursor.execute(insert_sql, params)
+            #print(f"[DEBUG] trade_records Row {idx} inserted with ID {ctrl_cursor.lastrowid}")
+        print(f"[DEBUG] Copied {len(rows)} trade_records rows from agent step {step_id} to controller DB (test_metrics_id {test_metrics_id}).")
+    except Exception as e:
+        print(f"[ERROR] Error during sync_trade_records (step_id {step_id}): {e}")
+        raise
+    finally:
+        ctrl_cursor.close()
+
+def sync_test_metrics(worker_job_id, ctrl_conn):
     agent_sql = """
     SELECT 
         job.controller_task_id,
@@ -133,19 +250,13 @@ def sync_test_metrics(worker_job_id):
         tm.magic_number,
         tm.input_html_file,
         tm.input_set_file,
-        tm.optimization_pass_id
+        tm.optimization_pass_id,
+        tm.step_id
     FROM set_file_jobs job
     JOIN set_file_steps steps ON steps.job_id = job.id
     JOIN test_metrics tm ON tm.step_id = steps.id
     WHERE job.id = ?
     """
-
-    # Connect to agent (SQLite)
-    agent_conn = sqlite3.connect(AGENT_DB_PATH)
-    agent_cursor = agent_conn.cursor()
-    agent_cursor.execute(agent_sql, (worker_job_id,))
-    rows = agent_cursor.fetchall()
-
     insert_sql = """
     INSERT INTO test_metrics (
         controller_task_id,
@@ -212,175 +323,100 @@ def sync_test_metrics(worker_job_id):
         optimization_pass_id
     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
-
-    # Connect to controller (MySQL)
-    ctrl_conn = pymysql.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
-        port=MYSQL_PORT or 3306,
-        charset='utf8mb4',
-        autocommit=False
-    )
-    ctrl_cursor = ctrl_conn.cursor()
-
-    try:
-        for row in rows:
-            print("INSERT columns:", insert_sql.split('(')[1].split(')')[0].count(',') + 1)
-            print("Row length:", len(row))
-            print("Placeholders:", insert_sql.count("%s"))
-            ctrl_cursor.execute(insert_sql, row)
-        ctrl_conn.commit()
-        print(f"Copied {len(rows)} test_metrics rows from agent job {worker_job_id} to controller DB.")
-    except Exception as e:
-        ctrl_conn.rollback()
-        print(f"Error during sync: {e}")
-    finally:
-        agent_cursor.close()
-        agent_conn.close()
-        ctrl_cursor.close()
-        ctrl_conn.close()
-
-def sync_trade_records(worker_job_id):
-    """
-    Sync trade_records rows for a specific worker job from agent (SQLite) to controller (MySQL) db.
-    Args:
-        worker_job_id (int): The job.id (out_worker_JobId) to sync.
-    """
-    agent_sql = """
-    SELECT
-        o.controller_task_id,
-        o.order_id,
-        o.symbol,
-        o.open_time,
-        o.open_type,
-        o.open_price,
-        o.open_size,
-        o.open_sl,
-        o.open_tp,
-        c.close_time,
-        c.close_type,
-        c.close_price,
-        c.close_size,
-        c.close_sl,
-        c.close_tp,
-        c.profit,
-        c.balance_after_trade,
-        o.magic_number,
-        o.comment
-    FROM (
-        SELECT
-            j.controller_task_id,
-            s.job_id,
-            t.step_id,
-            t.order_id,
-            t.symbol,
-            t.time AS open_time,
-            t.type AS open_type,
-            t.price AS open_price,
-            t.size AS open_size,
-            t.sl AS open_sl,
-            t.tp AS open_tp,
-            t.magic_number,
-            t.comment
-        FROM
-            trades t
-        JOIN set_file_steps s ON t.step_id = s.id
-        JOIN set_file_jobs j ON s.job_id = j.id
-        WHERE t.type IN ('buy', 'sell')
-          AND j.id = ?
-    ) o
-    JOIN (
-        SELECT
-            j.controller_task_id,
-            s.job_id,
-            t.step_id,
-            t.order_id,
-            t.time AS close_time,
-            t.type AS close_type,
-            t.price AS close_price,
-            t.size AS close_size,
-            t.sl AS close_sl,
-            t.tp AS close_tp,
-            t.profit,
-            t.balance AS balance_after_trade
-        FROM
-            trades t
-        JOIN set_file_steps s ON t.step_id = s.id
-        JOIN set_file_jobs j ON s.job_id = j.id
-        WHERE t.type LIKE 'close%'
-          AND j.id = ?
-    ) c
-    ON o.job_id = c.job_id
-       AND o.step_id = c.step_id
-       AND o.order_id = c.order_id
-       AND o.open_time < c.close_time
-    """
-
-    insert_sql = """
-    INSERT INTO trade_records (
-        controller_task_id,
-        order_id,
-        symbol,
-        open_time,
-        open_type,
-        open_price,
-        open_size,
-        open_sl,
-        open_tp,
-        close_time,
-        close_type,
-        close_price,
-        close_size,
-        close_sl,
-        close_tp,
-        profit,
-        balance_after_trade,
-        magic_number,
-        comment
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """
-
-    # Connect to agent (SQLite)
+    target_columns = [
+        'controller_task_id',
+        'metric_type',
+        'net_profit',
+        'gross_profit',
+        'gross_loss',
+        'profit_factor',
+        'expected_payoff',
+        'max_drawdown',
+        'max_drawdown_pct',
+        'max_relative_drawdown',
+        'max_relative_drawdown_pct',
+        'absolute_drawdown',
+        'initial_deposit',
+        'total_trades',
+        'profit_trades_pct',
+        'loss_trades_pct',
+        'largest_profit',
+        'largest_loss',
+        'recovery_factor',
+        'sharpe_ratio',
+        'sortino_ratio',
+        'net_profit_per_initial_deposit',
+        'absolute_drawdown_per_initial_deposit',
+        'symbol',
+        'period',
+        'model',
+        'bars_in_test',
+        'ticks_modelled',
+        'modelling_quality',
+        'mismatched_charts_errors',
+        'spread',
+        'short_positions',
+        'short_positions_won_pct',
+        'long_positions',
+        'long_positions_won_pct',
+        'largest_profit_trade',
+        'largest_loss_trade',
+        'max_consecutive_wins',
+        'max_consecutive_wins_profit',
+        'max_consecutive_profit',
+        'max_consecutive_profit_count',
+        'max_consecutive_losses',
+        'max_consecutive_losses_loss',
+        'max_consecutive_loss',
+        'max_consecutive_loss_count',
+        'win_rate',
+        'metrics_json',
+        'parameters_json',
+        'summary_csv',
+        'created_at',
+        'start_date',
+        'end_date',
+        'min_total_recovery',
+        'min_trades',
+        'min_max_drawdown',
+        'criteria_passed',
+        'criteria_reason',
+        'set_file_name',
+        'magic_number',
+        'input_html_file',
+        'input_set_file',
+        'optimization_pass_id'
+    ]
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
+    agent_conn.row_factory = sqlite3.Row
     agent_cursor = agent_conn.cursor()
-    agent_cursor.execute(agent_sql, (worker_job_id, worker_job_id))
+    agent_cursor.execute(agent_sql, (worker_job_id,))
     rows = agent_cursor.fetchall()
-
-    # Connect to controller (MySQL)
-    ctrl_conn = pymysql.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
-        port=MYSQL_PORT or 3306,
-        charset='utf8mb4',
-        autocommit=False
-    )
+    agent_cursor.close()
+    agent_conn.close()
+    if not rows:
+        print(f"[DEBUG] No test_metrics found for worker_job_id {worker_job_id}.")
+        return
     ctrl_cursor = ctrl_conn.cursor()
-
     try:
-        for row in rows:
-            ctrl_cursor.execute(insert_sql, row)
-        ctrl_conn.commit()
-        print(f"Copied {len(rows)} trade_records rows from agent job {worker_job_id} to controller DB.")
+        for idx, row in enumerate(rows):
+            params = tuple(row[col] for col in target_columns)
+            print(f"[DEBUG] test_metrics Row {idx}: Columns used: {target_columns[:3]}... (total {len(target_columns)})")
+            print(f"[DEBUG] test_metrics Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
+            if len(params) != 62:
+                print(f"[ERROR] test_metrics Row {idx}: Mismatch! Param count: {len(params)}, Placeholders: 62.")
+            ctrl_cursor.execute(insert_sql, params)
+            test_metrics_id = ctrl_cursor.lastrowid
+            if 'step_id' in row.keys():
+                sync_trade_records(row['step_id'], test_metrics_id, ctrl_conn)
+        print(f"[DEBUG] Copied {len(rows)} test_metrics rows from agent job {worker_job_id} to controller DB.")
     except Exception as e:
-        ctrl_conn.rollback()
-        print(f"Error during sync: {e}")
+        print(f"[ERROR] Error during sync_test_metrics: {e}")
+        raise
     finally:
-        agent_cursor.close()
-        agent_conn.close()
         ctrl_cursor.close()
-        ctrl_conn.close()
 
-def sync_artifacts(worker_job_id):
-    """
-    Sync set_file_artifacts rows for a specific worker job from agent (SQLite) to controller (MySQL) db,
-    then link artifacts to test_metrics for this job's controller_task_id.
-    Args:
-        worker_job_id (int): The job.id (out_worker_JobId) to sync.
-    """
+def sync_artifacts(worker_job_id, ctrl_conn):
     agent_sql = """
     SELECT
         job.controller_task_id,
@@ -395,7 +431,6 @@ def sync_artifacts(worker_job_id):
     JOIN set_file_artifacts art ON art.step_id = steps.id
     WHERE job.id = ?
     """
-
     insert_sql = """
     INSERT INTO controller_artifacts (
         task_id,
@@ -408,30 +443,16 @@ def sync_artifacts(worker_job_id):
         link_id
     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
-
-    # Connect to agent (SQLite)
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
     agent_cursor = agent_conn.cursor()
     agent_cursor.execute(agent_sql, (worker_job_id,))
     rows = agent_cursor.fetchall()
-
-    # Get controller_task_id (assume all rows for this worker_job_id share the same controller_task_id)
     controller_task_id = rows[0][0] if rows else None
-
-    # Connect to controller (MySQL)
-    ctrl_conn = pymysql.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
-        port=MYSQL_PORT or 3306,
-        charset='utf8mb4',
-        autocommit=False
-    )
+    agent_cursor.close()
+    agent_conn.close()
     ctrl_cursor = ctrl_conn.cursor()
-
     try:
-        for row in rows:
+        for idx, row in enumerate(rows):
             (
                 controller_task_id,
                 artifact_type,
@@ -442,56 +463,43 @@ def sync_artifacts(worker_job_id):
                 link_id,
             ) = row
             file_name = os.path.basename(file_path) if file_path else None
-            ctrl_cursor.execute(
-                insert_sql,
-                (
-                    controller_task_id,
-                    artifact_type,
-                    file_path,
-                    file_name,
-                    meta_json,
-                    file_blob,
-                    link_type,
-                    link_id,
-                )
+            params = (
+                controller_task_id,
+                artifact_type,
+                file_path,
+                file_name,
+                meta_json,
+                file_blob,
+                link_type,
+                link_id,
             )
-        ctrl_conn.commit()
-        print(f"Copied {len(rows)} artifact rows from agent job {worker_job_id} to controller DB.")
-
-        # --- Linking step ---
+            print(f"[DEBUG] controller_artifacts Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
+            if len(params) != 8:
+                print(f"[ERROR] controller_artifacts Row {idx}: Mismatch! Param count: {len(params)}, Placeholders: 8.")
+            ctrl_cursor.execute(insert_sql, params)
+        print(f"[DEBUG] Copied {len(rows)} artifact rows from agent job {worker_job_id} to controller DB.")
         if controller_task_id:
-            with controller_db_session() as session:
-                link_artifacts_to_test_metrics_for_task(session, controller_task_id)
-            print(f"Linked artifacts to test_metrics for controller_task_id={controller_task_id}")
-
+            #with controller_db_session() as session:
+            #    link_artifacts_to_test_metrics_for_task(session, controller_task_id)
+            link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id)
+            print(f"[DEBUG] Linked artifacts to test_metrics for controller_task_id={controller_task_id}")
     except Exception as e:
-        ctrl_conn.rollback()
-        print(f"Error during artifact sync: {e}")
+        print(f"[ERROR] Error during artifact sync: {e}")
+        raise
     finally:
-        agent_cursor.close()
-        agent_conn.close()
         ctrl_cursor.close()
-        ctrl_conn.close()
 
-def sync_ai_suggestions(worker_job_id):
-    """
-    Sync optimization_suggestion, optimization_section, and optimization_parameter from agent (SQLite)
-    to controller (MySQL) for a specific worker job, using correct controller job/task ids.
-    """
+def sync_ai_suggestions(worker_job_id, ctrl_conn):
     import sqlite3
-    import pymysql
-
-    # 1. Fetch suggestions (parent)
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
     agent_cursor = agent_conn.cursor()
-    # Use controller_job_id and controller_task_id for the insert mapping!
     agent_cursor.execute(
         """
         SELECT
             sug.id,
-            j.controller_job_id AS job_id,      -- controller_jobs.id for controller DB
-            j.controller_task_id AS task_id,    -- controller_tasks.id for controller DB
-            sug.mode,                           -- used as prompt (since agent does not store prompt/response)
+            j.controller_job_id AS job_id,
+            j.controller_task_id AS task_id,
+            sug.mode,
             sug.created_at
         FROM set_file_jobs j
         JOIN set_file_steps s ON s.job_id = j.id
@@ -500,20 +508,17 @@ def sync_ai_suggestions(worker_job_id):
         """, (worker_job_id,)
     )
     suggestion_rows_raw = agent_cursor.fetchall()
-    # Prepare for controller_ai_suggestions insert (id, job_id, task_id, prompt, response, created_at)
     suggestion_rows = [
         (
-            row[0],  # id
-            row[1],  # job_id (controller_job_id)
-            row[2],  # task_id (controller_task_id)
-            row[3] if row[3] is not None else "",  # prompt (use mode from agent)
-            "",     # response (not in agent db)
-            row[4]  # created_at
+            row[0],
+            row[1],
+            row[2],
+            row[3] if row[3] is not None else "",
+            "",
+            row[4]
         )
         for row in suggestion_rows_raw
     ]
-
-    # 2. Fetch sections (children)
     suggestion_ids = [row[0] for row in suggestion_rows_raw]
     section_rows = []
     if suggestion_ids:
@@ -531,8 +536,6 @@ def sync_ai_suggestions(worker_job_id):
             suggestion_ids
         )
         section_rows = agent_cursor.fetchall()
-
-    # 3. Fetch parameters (children)
     parameter_rows = []
     if suggestion_ids:
         ph = ",".join("?" for _ in suggestion_ids)
@@ -552,21 +555,10 @@ def sync_ai_suggestions(worker_job_id):
             suggestion_ids
         )
         parameter_rows = agent_cursor.fetchall()
-
-    # Connect to controller (MySQL)
-    ctrl_conn = pymysql.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
-        port=MYSQL_PORT or 3306,
-        charset='utf8mb4',
-        autocommit=False
-    )
+    agent_cursor.close()
+    agent_conn.close()
     ctrl_cursor = ctrl_conn.cursor()
-
     try:
-        # 1. Insert controller_ai_suggestions
         insert_suggestion_sql = """
         INSERT INTO controller_ai_suggestions (
             id,
@@ -583,10 +575,11 @@ def sync_ai_suggestions(worker_job_id):
             response=VALUES(response),
             created_at=VALUES(created_at)
         """
-        for row in suggestion_rows:
+        for idx, row in enumerate(suggestion_rows):
+            print(f"[DEBUG] controller_ai_suggestions Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
+            if len(row) != 6:
+                print(f"[ERROR] controller_ai_suggestions Row {idx}: Mismatch! Param count: {len(row)}, Placeholders: 6.")
             ctrl_cursor.execute(insert_suggestion_sql, row)
-
-        # 2. Insert optimization_section
         insert_section_sql = """
         INSERT INTO optimization_section (
             id,
@@ -599,10 +592,11 @@ def sync_ai_suggestions(worker_job_id):
             section_name=VALUES(section_name),
             explanation=VALUES(explanation)
         """
-        for row in section_rows:
+        for idx, row in enumerate(section_rows):
+            print(f"[DEBUG] optimization_section Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
+            if len(row) != 4:
+                print(f"[ERROR] optimization_section Row {idx}: Mismatch! Param count: {len(row)}, Placeholders: 4.")
             ctrl_cursor.execute(insert_section_sql, row)
-
-        # 3. Insert optimization_parameter
         insert_parameter_sql = """
         INSERT INTO optimization_parameter (
             id,
@@ -621,16 +615,14 @@ def sync_ai_suggestions(worker_job_id):
             step=VALUES(step),
             reason=VALUES(reason)
         """
-        for row in parameter_rows:
+        for idx, row in enumerate(parameter_rows):
+            print(f"[DEBUG] optimization_parameter Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
+            if len(row) != 7:
+                print(f"[ERROR] optimization_parameter Row {idx}: Mismatch! Param count: {len(row)}, Placeholders: 7.")
             ctrl_cursor.execute(insert_parameter_sql, row)
-
-        ctrl_conn.commit()
-        print(f"Copied {len(suggestion_rows)} suggestions, {len(section_rows)} sections, {len(parameter_rows)} parameters from agent job {worker_job_id} to controller DB.")
+        print(f"[DEBUG] Copied {len(suggestion_rows)} suggestions, {len(section_rows)} sections, {len(parameter_rows)} parameters from agent job {worker_job_id} to controller DB.")
     except Exception as e:
-        ctrl_conn.rollback()
-        print(f"Error during AI suggestions sync: {e}")
+        print(f"[ERROR] Error during AI suggestions sync: {e}")
+        raise
     finally:
-        agent_cursor.close()
-        agent_conn.close()
         ctrl_cursor.close()
-        ctrl_conn.close()

@@ -274,6 +274,18 @@ class Portfolio(Base):
 
     sizing_results = relationship("PositionSizingResult", back_populates="portfolio")
     trade_records = relationship("TradeRecord", back_populates="portfolio")
+    portfolio_sets = relationship("PortfolioSet", back_populates="portfolio", cascade="all, delete-orphan")
+    # ^^^ ONLY here!
+
+class PortfolioSet(Base):
+    __tablename__ = 'Portfolio_Sets'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portfolio_id = Column(Integer, ForeignKey('portfolios.id'), nullable=False)
+    test_metrics_id = Column(Integer, ForeignKey('test_metrics.id'), nullable=False)
+
+    portfolio = relationship("Portfolio", back_populates="portfolio_sets")  # <-- singular
+    test_metric = relationship("TestMetric")
+    # DO NOT declare portfolio_sets here!
 
 
 class PositionSizingResult(Base):

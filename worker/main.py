@@ -9,6 +9,8 @@ import threading
 import tempfile
 from datetime import datetime
 import traceback  # Added for detailed error tracebacks
+import pymysql
+from config import MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
 
 from db.status_constants import (
     STATUS_WORKER_IN_PROGRESS,
@@ -299,25 +301,44 @@ def main():
                     except Exception as e:
                         logging.warning(f"Failed to update worker_job_id for task {task_id}: {e}")
 
+            # --- DB sync block: use ONE MySQL connection for all syncs ---
             if status == STATUS_WORKER_COMPLETED and out_worker_JobId:
                 try:
                     logger.debug(f"Syncing DB for worker_job_id={out_worker_JobId}")
-                    sync_test_metrics(out_worker_JobId)
-                    sync_trade_records(out_worker_JobId)
-                    sync_artifacts(out_worker_JobId)
-                    sync_ai_suggestions(out_worker_JobId)
-                    logging.info(f"Synchronized all databases for worker_job_id={out_worker_JobId}")
-                except Exception as e:
-                    logging.error(f"Error during DB sync for worker_job_id={out_worker_JobId}: {e}")
 
-            # --- NEW BLOCK: Remove input blob key from Redis ---
+                    ctrl_conn = pymysql.connect(
+                        host=MYSQL_HOST,
+                        user=MYSQL_USER,
+                        password=MYSQL_PASSWORD,
+                        database=MYSQL_DATABASE,
+                        port=MYSQL_PORT,
+                        charset='utf8mb4',
+                        autocommit=False
+                    )
+
+                    try:
+                        sync_test_metrics(out_worker_JobId, ctrl_conn)
+                        # sync_trade_records(out_worker_JobId, ctrl_conn)  # If needed
+                        sync_artifacts(out_worker_JobId, ctrl_conn)
+                        sync_ai_suggestions(out_worker_JobId, ctrl_conn)
+                        ctrl_conn.commit()
+                        logging.info(f"Synchronized all databases for worker_job_id={out_worker_JobId}")
+                    except Exception as sync_err:
+                        ctrl_conn.rollback()
+                        logging.error(f"Error during DB sync for worker_job_id={out_worker_JobId}: {sync_err}")
+                    finally:
+                        ctrl_conn.close()
+
+                except Exception as e:
+                    logging.error(f"Error setting up DB sync connection for worker_job_id={out_worker_JobId}: {e}")
+
+            # --- Remove input blob key from Redis ---
             if input_blob_key:
                 try:
                     r.delete(input_blob_key)
                     logger.debug(f"Deleted input blob key {input_blob_key} from Redis after task {task_id} completion.")
                 except Exception as del_err:
                     logging.warning(f"Failed to delete input blob key {input_blob_key} from Redis: {del_err}")
-            # --- END NEW BLOCK ---
 
         except Exception as e:
             logging.error("Worker loop error: %s", e)

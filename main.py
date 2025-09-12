@@ -22,6 +22,9 @@ def is_admin():
 def is_logged_in():
     return get_logged_in_user() is not None
 
+def is_standard_user():
+    return get_current_user_role() == "Standard" or get_current_user_role() == "Trader"
+
 # --- Page Choices ---
 st.set_page_config(page_title="PocketFlow Main", layout="centered")
 st.title("PocketFlow Project")
@@ -30,7 +33,7 @@ st.markdown("Welcome to PocketFlow! Select a page from the navigation below:")
 # Sidebar and logout enhancement
 if is_logged_in():
     with st.sidebar:
-        options = ["Strategy Dashboard", "Settings / Profile"]
+        options = ["Strategy Dashboard", "Portfolio Management", "Settings / Profile"]
         if is_admin():
             options += ["Controller Dashboard", "Admin Approval / Audit Log"]
         page = st.radio("Go to page:", options)
@@ -57,6 +60,14 @@ elif page == "Strategy Dashboard":
     st.query_params["page"] = "strategy_dashboard"
     with st.spinner("Loading Strategy Dashboard..."):
         import_module_from_file("strategy_dashboard", os.path.join("streamlit", "strategy_dashboard.py"))
+
+elif page == "Portfolio Management":
+    if not is_standard_user():
+        st.error("You must be a Standard/Trader user to access this page.")
+    else:
+        st.query_params["page"] = "portfolio_management"
+        with st.spinner("Loading Portfolio Management..."):
+            import_module_from_file("portfolio_management", os.path.join("user_management", "portfolio_management.py"))
 
 elif page == "Settings / Profile":
     st.query_params["page"] = "settings_profile"
