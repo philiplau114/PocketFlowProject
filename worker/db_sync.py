@@ -1,6 +1,8 @@
 import sqlite3
 import pymysql
 import os
+import base64
+
 from sqlalchemy.orm import sessionmaker
 from config import (
     AGENT_DB_PATH,
@@ -8,6 +10,12 @@ from config import (
 )
 from sqlalchemy import create_engine, text
 from contextlib import contextmanager
+
+encoded_key = os.getenv("SQLCIPHER_KEY")
+if not encoded_key:
+    raise Exception("Environment variable SQLCIPHER_KEY is not set.")
+
+sqlcipher_key = base64.b64decode(encoded_key).decode()
 
 # Utility: SQLAlchemy session context for controller DB (used ONLY for linking step, not main inserts)
 @contextmanager
@@ -158,6 +166,7 @@ def sync_trade_records(step_id, test_metrics_id, ctrl_conn):
         "comment"
     ]
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
+    #agent_conn.execute(f"PRAGMA key = '{sqlcipher_key}';")
     agent_conn.row_factory = sqlite3.Row
     agent_cursor = agent_conn.cursor()
     agent_cursor.execute(agent_sql, (step_id, step_id))
@@ -388,6 +397,7 @@ def sync_test_metrics(worker_job_id, ctrl_conn):
         'optimization_pass_id'
     ]
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
+    #agent_conn.execute(f"PRAGMA key = '{sqlcipher_key}';")
     agent_conn.row_factory = sqlite3.Row
     agent_cursor = agent_conn.cursor()
     agent_cursor.execute(agent_sql, (worker_job_id,))
@@ -444,6 +454,7 @@ def sync_artifacts(worker_job_id, ctrl_conn):
     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
+    #agent_conn.execute(f"PRAGMA key = '{sqlcipher_key}';")
     agent_cursor = agent_conn.cursor()
     agent_cursor.execute(agent_sql, (worker_job_id,))
     rows = agent_cursor.fetchall()
@@ -492,6 +503,7 @@ def sync_artifacts(worker_job_id, ctrl_conn):
 def sync_ai_suggestions(worker_job_id, ctrl_conn):
     import sqlite3
     agent_conn = sqlite3.connect(AGENT_DB_PATH)
+    #agent_conn.execute(f"PRAGMA key = '{sqlcipher_key}';")
     agent_cursor = agent_conn.cursor()
     agent_cursor.execute(
         """
