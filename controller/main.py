@@ -137,7 +137,8 @@ def main_loop():
                     # DO NOT set status to 'queued' here; keep as STATUS_NEW
                     session.commit()
                     print("DEBUG: file_blob committed to DB")
-                shutil.move(str(file), str(config.PROCESSED_FOLDER / file.name))
+                #shutil.move(str(file), str(config.PROCESSED_FOLDER / file.name))
+                shutil.move(str(file), os.path.join(config.PROCESSED_FOLDER, file.name))
                 logging.info(f"Moved processed file {file.name} to {config.PROCESSED_FOLDER}")
                 print(f"DEBUG: Task for file {file.name} processed and ready for queueing.")
                 logging.info("Created new task: %s (using file_blob)", file.name)
