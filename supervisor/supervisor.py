@@ -11,7 +11,7 @@ from db_utils import (
     ControllerTask,
 )
 from notify import send_email, send_telegram
-import config  # Import your config.py
+import config
 
 logging.basicConfig(level=logging.INFO)
 
@@ -59,35 +59,75 @@ def notify_inactive_worker(worker_id, minutes):
     send_email(subject, body)
     send_telegram(body)
 
-def reconcile_db_redis(session, r, redis_queue):
-    """
-    Requeue any tasks that are marked as 'queued' in the DB but may be missing from the Redis queue.
-    """
+def handle_processing_queue_stuck_tasks(r, session):
+    processing_queue = config.REDIS_PROCESSING_QUEUE
+    stuck_threshold = config.JOB_STUCK_THRESHOLD_MINUTES * 60  # seconds
+    processing_tasks = r.lrange(processing_queue, 0, -1)
+    now = time.time()
+
+    for task_json in processing_tasks:
+        try:
+            if isinstance(task_json, bytes):
+                task_json = task_json.decode("utf-8")
+            task = json.loads(task_json)
+            task_id = task.get("task_id")
+            controller_task = session.query(ControllerTask).get(task_id)
+            if not controller_task:
+                continue
+            started_at = getattr(controller_task, "updated_at", None)
+            if started_at:
+                seconds_in_processing = (now - started_at.timestamp())
+            else:
+                seconds_in_processing = stuck_threshold + 1
+
+            if seconds_in_processing > stuck_threshold:
+                logging.warning(f"Task {task_id} stuck in processing queue for {seconds_in_processing}s")
+                current_attempt = controller_task.attempt_count or 0
+                max_attempts = controller_task.max_attempts or 1
+
+                if current_attempt + 1 < max_attempts:
+                    r.lrem(processing_queue, 1, task_json)
+                    r.lpush(config.REDIS_MAIN_QUEUE, task_json)
+                    requeue_task(session, controller_task)
+                    notify_task_retry(controller_task, current_attempt)
+                else:
+                    r.lrem(processing_queue, 1, task_json)
+                    r.lpush(config.REDIS_DEAD_LETTER_QUEUE, task_json)
+                    controller_task.status = "failed"
+                    session.commit()
+                    notify_task_failed(controller_task)
+        except Exception as e:
+            logging.error(f"Error handling stuck processing task: {e}")
+
+def reconcile_db_redis(session, r, redis_main_queue):
     logging.info("Reconciling DB and Redis queue for 'queued' tasks...")
+
+    main_queue_tasks = set(r.lrange(config.REDIS_MAIN_QUEUE, 0, -1))
+    processing_queue_tasks = set(r.lrange(config.REDIS_PROCESSING_QUEUE, 0, -1))
+
     tasks = session.query(ControllerTask).filter_by(status="queued").all()
     requeued_count = 0
     for task in tasks:
-        # Compose the task data as per your worker's expectations
         task_data = {
             "job_id": task.job_id,
             "task_id": task.id,
-            "set_file": task.file_path,
+            "set_file_name": task.file_path,
             "ea_name": getattr(task, 'ea_name', None),
             "symbol": getattr(task, 'symbol', None),
             "timeframe": getattr(task, 'timeframe', None),
         }
-        # For simplicity, always requeue; deduplication is handled by DB/task status.
-        r.lpush(redis_queue, json.dumps(task_data))
-        requeued_count += 1
+        task_json = json.dumps(task_data)
+        if (task_json not in main_queue_tasks) and (task_json not in processing_queue_tasks):
+            r.lpush(config.REDIS_MAIN_QUEUE, task_json)
+            requeued_count += 1
     if requeued_count:
-        logging.info(f"Requeued {requeued_count} queued tasks to Redis.")
+        logging.info(f"Requeued {requeued_count} queued tasks to Redis main queue.")
 
 def main():
     r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
     while True:
         try:
             with get_db() as session:
-                # --- Handle Stuck Tasks ---
                 stuck_tasks = get_stuck_tasks(session, threshold_minutes=config.JOB_STUCK_THRESHOLD_MINUTES)
                 for task in stuck_tasks:
                     notify_stuck_task(task)
@@ -107,7 +147,8 @@ def main():
                         )
                         notify_task_failed(task)
 
-                # --- Handle Inactive Workers ---
+                handle_processing_queue_stuck_tasks(r, session)
+
                 inactive_workers = get_inactive_workers(
                     session, threshold_minutes=config.WORKER_INACTIVE_THRESHOLD_MINUTES
                 )
@@ -117,8 +158,7 @@ def main():
                     )
                     notify_inactive_worker(worker_id, config.WORKER_INACTIVE_THRESHOLD_MINUTES)
 
-                # --- Reconcile DB and Redis queue ---
-                reconcile_db_redis(session, r, config.REDIS_QUEUE)
+                reconcile_db_redis(session, r, config.REDIS_MAIN_QUEUE)
 
         except Exception as e:
             logging.error("Supervisor error: %s", e)
