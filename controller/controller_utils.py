@@ -109,9 +109,10 @@ def queue_task_to_redis(r, task):
         "task_id": task.id,
         'set_file_name': os.path.basename(task.file_path),
         "input_blob_key": file_blob_key,
-        "ea_name": getattr(task, "ea_name", None),
-        "symbol": getattr(task, "symbol", None),
-        "timeframe": getattr(task, "timeframe", None),
+        # Fetch from the job relationship!
+        "ea_name": getattr(task.job, "ea_name", None),
+        "symbol": getattr(task.job, "symbol", None),
+        "timeframe": getattr(task.job, "timeframe", None),
     }
     print(f"DEBUG: task_data = {task_data}")
     r.lpush(REDIS_QUEUE, json.dumps(task_data))
