@@ -8,31 +8,19 @@ import subprocess
 import threading
 import tempfile
 from datetime import datetime
-import traceback  # Added for detailed error tracebacks
+import traceback
 import pymysql
-from config import MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
-
+from config import (
+    MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE,
+    REDIS_HOST, REDIS_PORT, REDIS_MAIN_QUEUE, REDIS_PROCESSING_QUEUE,
+    REDIS_DEAD_LETTER_QUEUE, WORKER_ID,
+    UIPATH_CLI, UIPATH_WORKFLOW, UIPATH_JOB_MAX_SECONDS, UIPATH_KILL_FILE, UIPATH_MT4_LIB, UIPATH_CONFIG,
+    OUTPUT_JSON_DIR, OUTPUT_JSON_POLL_INTERVAL, OUTPUT_JSON_WARNING_MODULUS
+)
 from db.status_constants import (
     STATUS_WORKER_IN_PROGRESS,
     STATUS_WORKER_COMPLETED,
     STATUS_WORKER_FAILED,
-)
-
-# Load .env.worker first for overrides, then .env for defaults
-# Get the absolute path to the project root and worker folder
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-WORKER_DIR = os.path.join(PROJECT_ROOT, 'worker')
-
-# Load .env from the root
-load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=False)
-
-# Load .env.worker from the worker directory
-load_dotenv(os.path.join(WORKER_DIR, '.env.worker'), override=True)
-
-from config import (
-    REDIS_HOST, REDIS_PORT, REDIS_QUEUE, WORKER_ID,
-    UIPATH_CLI, UIPATH_WORKFLOW, UIPATH_JOB_MAX_SECONDS, UIPATH_KILL_FILE, UIPATH_MT4_LIB, UIPATH_CONFIG,
-    OUTPUT_JSON_DIR, OUTPUT_JSON_POLL_INTERVAL, OUTPUT_JSON_WARNING_MODULUS
 )
 from db_utils import (
     update_task_status, create_attempt, finish_attempt, get_db,
@@ -43,7 +31,7 @@ from notify import send_email, send_telegram
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)  # Enable debug level globally
+logger.setLevel(logging.DEBUG)
 
 def notify_kill(task_id, reason, extra=None):
     subject = f"[Worker Kill] Task {task_id} killed due to {reason}"
@@ -55,15 +43,16 @@ def notify_kill(task_id, reason, extra=None):
     logging.warning(body)
 
 def main():
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)  # decode_responses=False for binary data
-
+    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
     HEARTBEAT_INTERVAL = 300  # seconds (5 min)
+
     while True:
         try:
-            logger.debug(f"Waiting for task from Redis queue: {REDIS_QUEUE}")
-            task_json = r.rpop(REDIS_QUEUE)
+            logger.debug(f"Waiting for task from Redis main queue: {REDIS_MAIN_QUEUE}")
+            # Atomically move task from main to processing queue
+            task_json = r.rpoplpush(REDIS_MAIN_QUEUE, REDIS_PROCESSING_QUEUE)
             if not task_json:
-                logger.debug("No task found in Redis queue, sleeping 5 seconds.")
+                logger.debug("No task found in Redis main queue, sleeping 5 seconds.")
                 time.sleep(5)
                 continue
             # Parse JSON using utf-8 since decode_responses=False
@@ -80,7 +69,6 @@ def main():
 
             logger.debug(f"job_id={job_id}, task_id={task_id}, set_file_name={set_file_name}, input_blob_key={input_blob_key}")
 
-            # --- NEW BLOCK: Fetch file_blob from Redis, write to temp file ---
             file_blob = r.get(input_blob_key)
             logger.debug(f"Fetched file_blob from Redis for key {input_blob_key}, type: {type(file_blob)}, length: {len(file_blob) if file_blob else 0}")
             if not file_blob:
@@ -97,7 +85,6 @@ def main():
             with open(set_file_path, "wb") as f:
                 f.write(file_blob)
             logging.info(f"Wrote input set file for task {task_id}: {set_file_path}")
-            # --- END NEW BLOCK ---
 
             logging.info(f"Picked up task {task_id} for set file {set_file_path}")
 
@@ -112,14 +99,12 @@ def main():
                 start_time = time.time()
                 last_heartbeat = start_time
 
-                # Generate a unique output JSON path
                 output_json_path = os.path.join(
                     OUTPUT_JSON_DIR,
                     f"uipath_output_{job_id}_{task_id}_{int(time.time())}.json"
                 )
                 logger.debug(f"Output JSON path: {output_json_path}")
 
-                # Start UiPath process with output path
                 uipath_input = {
                     "in_JobId": str(job_id),
                     "in_TaskId": str(task_id),
@@ -165,7 +150,6 @@ def main():
                 kill_thread.daemon = True
                 kill_thread.start()
 
-                # Main supervision loop
                 json_ready = False
                 file_parse_attempts = 0
                 last_grace_after_json = None
@@ -174,14 +158,12 @@ def main():
                 while True:
                     now = time.time()
                     elapsed = now - start_time
-                    # Heartbeat
                     if now - last_heartbeat > HEARTBEAT_INTERVAL:
                         logger.debug(f"Sending heartbeat for task {task_id}")
                         with get_db() as session:
                             update_task_heartbeat(session, task_id)
                         last_heartbeat = now
 
-                    # Timeout
                     if elapsed > UIPATH_JOB_MAX_SECONDS:
                         logging.error(f"UIPATH_JOB_MAX_SECONDS reached ({elapsed}s): Killing UiPath process for task {task_id}")
                         process.kill()
@@ -190,7 +172,6 @@ def main():
                         error_message = f"Timeout: UiPath process exceeded {UIPATH_JOB_MAX_SECONDS} seconds"
                         break
 
-                    # Output JSON supervision
                     if os.path.exists(output_json_path):
                         logger.debug(f"Output JSON file exists at {output_json_path}")
                         try:
@@ -207,7 +188,6 @@ def main():
                             continue
 
                     if json_ready:
-                        # Once JSON is ready, kill UiPath process if still running and exit loop
                         if process.poll() is None:
                             logging.info(f"Killing UiPath process for task {task_id} after output JSON is ready.")
                             process.kill()
@@ -219,12 +199,10 @@ def main():
                         logger.debug(f"UiPath outputs: {uipath_outputs}")
                         break
 
-                    # If process exited but no JSON yet, allow short grace period for file flush
                     if process.poll() is not None and not json_ready:
                         if last_grace_after_json is None:
                             last_grace_after_json = now
                         elif now - last_grace_after_json > 10:
-                            # 10 seconds grace for file to be flushed after process exit
                             out_Status = "Failed"
                             error_message = "UiPath process exited but output JSON not produced"
                             logger.error(f"UiPath process exited but output JSON not produced for task {task_id}")
@@ -233,7 +211,6 @@ def main():
                         time.sleep(1)
                         continue
 
-                    # Handle killed process
                     if killed_flag[0]:
                         out_Status = "Killed"
                         error_message = "Process killed (timeout/manual)"
@@ -242,7 +219,6 @@ def main():
 
                     time.sleep(2)
 
-                # Collect stdout/stderr for logging
                 try:
                     stdout, stderr = process.communicate(timeout=10)
                     logger.debug(f"Process stdout for task {task_id}: {stdout}")
@@ -263,7 +239,6 @@ def main():
                     })
                     logger.debug(f"Created fallback result_json_blob for task {task_id}")
 
-                # Cleanup output JSON
                 try:
                     if os.path.exists(output_json_path):
                         os.remove(output_json_path)
@@ -271,7 +246,6 @@ def main():
                 except Exception as cleanup_err:
                     logging.warning(f"Failed to remove temp output file: {output_json_path}: {cleanup_err}")
 
-                # Cleanup input set file
                 try:
                     if os.path.exists(set_file_path):
                         os.remove(set_file_path)
@@ -287,7 +261,6 @@ def main():
                 result_json_blob = None
                 out_worker_JobId = None
 
-            # Finalize DB
             status = STATUS_WORKER_COMPLETED if (out_Status and out_Status.lower() == "completed") else STATUS_WORKER_FAILED
             logger.debug(f"Finalizing task {task_id} in DB with status: {status}, error_message: {error_message}")
             with get_db() as session:
@@ -301,38 +274,13 @@ def main():
                     except Exception as e:
                         logging.warning(f"Failed to update worker_job_id for task {task_id}: {e}")
 
-            # --- DB sync block: use ONE MySQL connection for all syncs ---
-            if status == STATUS_WORKER_COMPLETED and out_worker_JobId:
-                try:
-                    logger.debug(f"Syncing DB for worker_job_id={out_worker_JobId}")
+            # Remove the task from the processing queue after finishing (success or fail)
+            try:
+                r.lrem(REDIS_PROCESSING_QUEUE, 1, task_json)
+                logger.debug(f"Removed task {task_id} from processing queue after completion.")
+            except Exception as e:
+                logger.warning(f"Failed to remove task {task_id} from processing queue: {e}")
 
-                    ctrl_conn = pymysql.connect(
-                        host=MYSQL_HOST,
-                        user=MYSQL_USER,
-                        password=MYSQL_PASSWORD,
-                        database=MYSQL_DATABASE,
-                        port=MYSQL_PORT,
-                        charset='utf8mb4',
-                        autocommit=False
-                    )
-
-                    try:
-                        sync_test_metrics(out_worker_JobId, ctrl_conn)
-                        # sync_trade_records(out_worker_JobId, ctrl_conn)  # If needed
-                        sync_artifacts(out_worker_JobId, ctrl_conn)
-                        sync_ai_suggestions(out_worker_JobId, ctrl_conn)
-                        ctrl_conn.commit()
-                        logging.info(f"Synchronized all databases for worker_job_id={out_worker_JobId}")
-                    except Exception as sync_err:
-                        ctrl_conn.rollback()
-                        logging.error(f"Error during DB sync for worker_job_id={out_worker_JobId}: {sync_err}")
-                    finally:
-                        ctrl_conn.close()
-
-                except Exception as e:
-                    logging.error(f"Error setting up DB sync connection for worker_job_id={out_worker_JobId}: {e}")
-
-            # --- Remove input blob key from Redis ---
             if input_blob_key:
                 try:
                     r.delete(input_blob_key)
