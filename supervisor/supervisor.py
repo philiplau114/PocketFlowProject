@@ -60,6 +60,7 @@ def notify_inactive_worker(worker_id, minutes):
     send_telegram(body)
 
 def handle_processing_queue_stuck_tasks(r, session):
+    # Scan processing queue for stuck tasks and retry/dead-letter as needed
     processing_queue = config.REDIS_PROCESSING_QUEUE
     stuck_threshold = config.JOB_STUCK_THRESHOLD_MINUTES * 60  # seconds
     processing_tasks = r.lrange(processing_queue, 0, -1)
@@ -100,6 +101,7 @@ def handle_processing_queue_stuck_tasks(r, session):
             logging.error(f"Error handling stuck processing task: {e}")
 
 def reconcile_db_redis(session, r, redis_main_queue):
+    # Requeue any 'queued' tasks in DB but missing from Redis main/processing queues
     logging.info("Reconciling DB and Redis queue for 'queued' tasks...")
 
     main_queue_tasks = set(r.lrange(config.REDIS_MAIN_QUEUE, 0, -1))
@@ -128,6 +130,7 @@ def main():
     while True:
         try:
             with get_db() as session:
+                # --- Handle Stuck Tasks in DB ---
                 stuck_tasks = get_stuck_tasks(session, threshold_minutes=config.JOB_STUCK_THRESHOLD_MINUTES)
                 for task in stuck_tasks:
                     notify_stuck_task(task)
@@ -147,8 +150,10 @@ def main():
                         )
                         notify_task_failed(task)
 
+                # --- Handle Stuck Tasks in Processing Queue ---
                 handle_processing_queue_stuck_tasks(r, session)
 
+                # --- Handle Inactive Workers ---
                 inactive_workers = get_inactive_workers(
                     session, threshold_minutes=config.WORKER_INACTIVE_THRESHOLD_MINUTES
                 )
@@ -158,6 +163,7 @@ def main():
                     )
                     notify_inactive_worker(worker_id, config.WORKER_INACTIVE_THRESHOLD_MINUTES)
 
+                # --- Reconcile DB and Redis queue ---
                 reconcile_db_redis(session, r, config.REDIS_MAIN_QUEUE)
 
         except Exception as e:

@@ -69,6 +69,7 @@ def main():
 
             logger.debug(f"job_id={job_id}, task_id={task_id}, set_file_name={set_file_name}, input_blob_key={input_blob_key}")
 
+            # --- Fetch file_blob from Redis, write to temp file ---
             file_blob = r.get(input_blob_key)
             logger.debug(f"Fetched file_blob from Redis for key {input_blob_key}, type: {type(file_blob)}, length: {len(file_blob) if file_blob else 0}")
             if not file_blob:
@@ -158,12 +159,14 @@ def main():
                 while True:
                     now = time.time()
                     elapsed = now - start_time
+                    # Heartbeat
                     if now - last_heartbeat > HEARTBEAT_INTERVAL:
                         logger.debug(f"Sending heartbeat for task {task_id}")
                         with get_db() as session:
                             update_task_heartbeat(session, task_id)
                         last_heartbeat = now
 
+                    # Timeout
                     if elapsed > UIPATH_JOB_MAX_SECONDS:
                         logging.error(f"UIPATH_JOB_MAX_SECONDS reached ({elapsed}s): Killing UiPath process for task {task_id}")
                         process.kill()
@@ -172,6 +175,7 @@ def main():
                         error_message = f"Timeout: UiPath process exceeded {UIPATH_JOB_MAX_SECONDS} seconds"
                         break
 
+                    # Output JSON supervision
                     if os.path.exists(output_json_path):
                         logger.debug(f"Output JSON file exists at {output_json_path}")
                         try:
@@ -188,6 +192,7 @@ def main():
                             continue
 
                     if json_ready:
+                        # Once JSON is ready, kill UiPath process if still running and exit loop
                         if process.poll() is None:
                             logging.info(f"Killing UiPath process for task {task_id} after output JSON is ready.")
                             process.kill()
@@ -199,10 +204,12 @@ def main():
                         logger.debug(f"UiPath outputs: {uipath_outputs}")
                         break
 
+                    # If process exited but no JSON yet, allow short grace period for file flush
                     if process.poll() is not None and not json_ready:
                         if last_grace_after_json is None:
                             last_grace_after_json = now
                         elif now - last_grace_after_json > 10:
+                            # 10 seconds grace for file to be flushed after process exit
                             out_Status = "Failed"
                             error_message = "UiPath process exited but output JSON not produced"
                             logger.error(f"UiPath process exited but output JSON not produced for task {task_id}")
@@ -211,6 +218,7 @@ def main():
                         time.sleep(1)
                         continue
 
+                    # Handle killed process
                     if killed_flag[0]:
                         out_Status = "Killed"
                         error_message = "Process killed (timeout/manual)"
@@ -219,6 +227,7 @@ def main():
 
                     time.sleep(2)
 
+                # Collect stdout/stderr for logging
                 try:
                     stdout, stderr = process.communicate(timeout=10)
                     logger.debug(f"Process stdout for task {task_id}: {stdout}")
@@ -239,6 +248,7 @@ def main():
                     })
                     logger.debug(f"Created fallback result_json_blob for task {task_id}")
 
+                # Cleanup output JSON
                 try:
                     if os.path.exists(output_json_path):
                         os.remove(output_json_path)
@@ -246,6 +256,7 @@ def main():
                 except Exception as cleanup_err:
                     logging.warning(f"Failed to remove temp output file: {output_json_path}: {cleanup_err}")
 
+                # Cleanup input set file
                 try:
                     if os.path.exists(set_file_path):
                         os.remove(set_file_path)
@@ -274,19 +285,51 @@ def main():
                     except Exception as e:
                         logging.warning(f"Failed to update worker_job_id for task {task_id}: {e}")
 
-            # Remove the task from the processing queue after finishing (success or fail)
-            try:
-                r.lrem(REDIS_PROCESSING_QUEUE, 1, task_json)
-                logger.debug(f"Removed task {task_id} from processing queue after completion.")
-            except Exception as e:
-                logger.warning(f"Failed to remove task {task_id} from processing queue: {e}")
+            # --- DB sync block: use ONE MySQL connection for all syncs ---
+            if status == STATUS_WORKER_COMPLETED and out_worker_JobId:
+                try:
+                    logger.debug(f"Syncing DB for worker_job_id={out_worker_JobId}")
 
+                    ctrl_conn = pymysql.connect(
+                        host=MYSQL_HOST,
+                        user=MYSQL_USER,
+                        password=MYSQL_PASSWORD,
+                        database=MYSQL_DATABASE,
+                        port=MYSQL_PORT,
+                        charset='utf8mb4',
+                        autocommit=False
+                    )
+
+                    try:
+                        sync_test_metrics(out_worker_JobId, ctrl_conn)
+                        # sync_trade_records(out_worker_job_id, ctrl_conn)  # If needed
+                        sync_artifacts(out_worker_JobId, ctrl_conn)
+                        sync_ai_suggestions(out_worker_JobId, ctrl_conn)
+                        ctrl_conn.commit()
+                        logging.info(f"Synchronized all databases for worker_job_id={out_worker_JobId}")
+                    except Exception as sync_err:
+                        ctrl_conn.rollback()
+                        logging.error(f"Error during DB sync for worker_job_id={out_worker_JobId}: {sync_err}")
+                    finally:
+                        ctrl_conn.close()
+
+                except Exception as e:
+                    logging.error(f"Error setting up DB sync connection for worker_job_id={out_worker_JobId}: {e}")
+
+            # --- Remove input blob key from Redis ---
             if input_blob_key:
                 try:
                     r.delete(input_blob_key)
                     logger.debug(f"Deleted input blob key {input_blob_key} from Redis after task {task_id} completion.")
                 except Exception as del_err:
                     logging.warning(f"Failed to delete input blob key {input_blob_key} from Redis: {del_err}")
+
+            # --- Remove the task from the processing queue after finishing (success or fail) ---
+            try:
+                r.lrem(REDIS_PROCESSING_QUEUE, 1, task_json)
+                logger.debug(f"Removed task {task_id} from processing queue after completion.")
+            except Exception as e:
+                logger.warning(f"Failed to remove task {task_id} from processing queue: {e}")
 
         except Exception as e:
             logging.error("Worker loop error: %s", e)
