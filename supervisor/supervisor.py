@@ -2,6 +2,7 @@ import time
 import logging
 import redis
 import json
+import os
 
 from db_utils import (
     get_db,
@@ -59,6 +60,37 @@ def notify_inactive_worker(worker_id, minutes):
     send_email(subject, body)
     send_telegram(body)
 
+def build_task_data_for_redis(task):
+    """
+    Builds a task JSON dict for Redis queue, consistent with controller_utils.queue_task_to_redis.
+    """
+    # Try to get job info if present, otherwise fallback to task fields
+    ea_name = None
+    symbol = None
+    timeframe = None
+    job = getattr(task, "job", None)
+    if job is not None:
+        ea_name = getattr(job, "ea_name", None)
+        symbol = getattr(job, "symbol", None)
+        timeframe = getattr(job, "timeframe", None)
+    else:
+        ea_name = getattr(task, "ea_name", None)
+        symbol = getattr(task, "symbol", None)
+        timeframe = getattr(task, "timeframe", None)
+
+    file_blob_key = f"task:{task.id}:input_blob"
+    set_file_name = os.path.basename(task.file_path) if task.file_path else None
+
+    return {
+        "job_id": task.job_id,
+        "task_id": task.id,
+        "set_file_name": set_file_name,
+        "input_blob_key": file_blob_key,
+        "ea_name": ea_name,
+        "symbol": symbol,
+        "timeframe": timeframe,
+    }
+
 def handle_processing_queue_stuck_tasks(r, session):
     # Scan processing queue for stuck tasks and retry/dead-letter as needed
     processing_queue = config.REDIS_PROCESSING_QUEUE
@@ -88,8 +120,11 @@ def handle_processing_queue_stuck_tasks(r, session):
 
                 if current_attempt + 1 < max_attempts:
                     r.lrem(processing_queue, 1, task_json)
-                    r.lpush(config.REDIS_MAIN_QUEUE, task_json)
                     requeue_task(session, controller_task)
+                    # Requeue task in Redis in controller_utils-compatible format
+                    new_task_data = build_task_data_for_redis(controller_task)
+                    new_task_json = json.dumps(new_task_data)
+                    r.lpush(config.REDIS_MAIN_QUEUE, new_task_json)
                     notify_task_retry(controller_task, current_attempt)
                 else:
                     r.lrem(processing_queue, 1, task_json)
@@ -110,14 +145,7 @@ def reconcile_db_redis(session, r, redis_main_queue):
     tasks = session.query(ControllerTask).filter_by(status="queued").all()
     requeued_count = 0
     for task in tasks:
-        task_data = {
-            "job_id": task.job_id,
-            "task_id": task.id,
-            "set_file_name": task.file_path,
-            "ea_name": getattr(task, 'ea_name', None),
-            "symbol": getattr(task, 'symbol', None),
-            "timeframe": getattr(task, 'timeframe', None),
-        }
+        task_data = build_task_data_for_redis(task)
         task_json = json.dumps(task_data)
         if (task_json not in main_queue_tasks) and (task_json not in processing_queue_tasks):
             r.lpush(config.REDIS_MAIN_QUEUE, task_json)
@@ -142,6 +170,10 @@ def main():
                             f"Task {task.id} ({task.file_path}) stuck for over {config.JOB_STUCK_THRESHOLD_MINUTES} min. Retrying (attempt {current_attempt + 1}/{max_attempts})."
                         )
                         notify_task_retry(task, current_attempt)
+                        # Requeue in Redis main queue in controller_utils-compatible format
+                        task_data = build_task_data_for_redis(task)
+                        task_json = json.dumps(task_data)
+                        r.lpush(config.REDIS_MAIN_QUEUE, task_json)
                     else:
                         task.status = "failed"
                         session.commit()
