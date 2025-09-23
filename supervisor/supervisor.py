@@ -13,10 +13,20 @@ from db_utils import (
 )
 from notify import send_email, send_telegram
 import config
+from db.status_constants import (
+    STATUS_NEW,
+    STATUS_RETRYING,
+    STATUS_FINE_TUNING,
+    STATUS_COMPLETED_SUCCESS,
+    STATUS_COMPLETED_PARTIAL,
+    STATUS_FAILED,
+    STATUS_QUEUED,
+)
 
 logging.basicConfig(level=logging.INFO)
 
 def notify_task_retry(task, attempt_count):
+    # Notify on task retry attempt via email and telegram
     subject = f"[Task Retry] {task.file_path or '(unknown)'} | Task ID: {task.id}"
     body = (
         f"Task for set file: {task.file_path or '(unknown)'}\n"
@@ -29,6 +39,7 @@ def notify_task_retry(task, attempt_count):
     send_telegram(body)
 
 def notify_task_failed(task):
+    # Notify when a task is permanently failed
     subject = f"[Task Failed] {task.file_path or '(unknown)'} | Task ID: {task.id}"
     body = (
         f"Task for set file: {task.file_path or '(unknown)'}\n"
@@ -41,6 +52,7 @@ def notify_task_failed(task):
     send_telegram(body)
 
 def notify_stuck_task(task):
+    # Notify when a stuck task is detected
     subject = f"[Task Stuck] {task.file_path or '(unknown)'} | Task ID: {task.id}"
     body = (
         f"Task for set file: {task.file_path or '(unknown)'}\n"
@@ -52,6 +64,7 @@ def notify_stuck_task(task):
     send_telegram(body)
 
 def notify_inactive_worker(worker_id, minutes):
+    # Notify when a worker is inactive
     subject = f"[Worker Inactive] Worker ID: {worker_id}"
     body = (
         f"Worker {worker_id} has not sent a heartbeat for over {minutes} minutes.\n"
@@ -64,7 +77,6 @@ def build_task_data_for_redis(task):
     """
     Builds a task JSON dict for Redis queue, consistent with controller_utils.queue_task_to_redis.
     """
-    # Try to get job info if present, otherwise fallback to task fields
     ea_name = None
     symbol = None
     timeframe = None
@@ -91,80 +103,82 @@ def build_task_data_for_redis(task):
         "timeframe": timeframe,
     }
 
-def handle_processing_queue_stuck_tasks(r, session):
-    # Scan processing queue for stuck tasks and retry/dead-letter as needed
-    processing_queue = config.REDIS_PROCESSING_QUEUE
-    stuck_threshold = config.JOB_STUCK_THRESHOLD_MINUTES * 60  # seconds
-    processing_tasks = r.lrange(processing_queue, 0, -1)
-    now = time.time()
+def ensure_file_blob_in_redis(r, task, session):
+    """
+    Ensure file_blob for a task exists in Redis before re-queueing.
+    If missing, restores from DB if possible.
+    If file_blob cannot be restored, marks the task as failed.
+    Returns True if file_blob is present in Redis after this call, else False.
+    """
+    file_blob_key = f"task:{task.id}:input_blob"
+    exists = r.exists(file_blob_key)
+    if not exists:
+        # Try to restore from DB
+        if getattr(task, "file_blob", None):
+            r.set(file_blob_key, task.file_blob)
+            logging.info(f"Restored missing file_blob for task {task.id} from DB")
+            return True
+        else:
+            # Cannot restore, mark as failed and log/notify
+            task.status = STATUS_FAILED
+            task.last_error = "Missing file_blob in Redis and DB"
+            session.commit()
+            logging.error(f"Failed to restore missing file_blob for task {task.id}; marked as failed")
+            notify_task_failed(task)
+            return False
+    return True
 
-    for task_json in processing_tasks:
-        try:
-            if isinstance(task_json, bytes):
-                task_json = task_json.decode("utf-8")
-            task = json.loads(task_json)
-            task_id = task.get("task_id")
-            controller_task = session.query(ControllerTask).get(task_id)
-            if not controller_task:
-                continue
-            started_at = getattr(controller_task, "updated_at", None)
-            if started_at:
-                seconds_in_processing = (now - started_at.timestamp())
-            else:
-                seconds_in_processing = stuck_threshold + 1
-
-            if seconds_in_processing > stuck_threshold:
-                logging.warning(f"Task {task_id} stuck in processing queue for {seconds_in_processing}s")
-                current_attempt = controller_task.attempt_count or 0
-                max_attempts = controller_task.max_attempts or 1
-
-                if current_attempt + 1 < max_attempts:
-                    r.lrem(processing_queue, 1, task_json)
-                    requeue_task(session, controller_task)
-                    # Requeue task in Redis in controller_utils-compatible format
-                    new_task_data = build_task_data_for_redis(controller_task)
-                    new_task_json = json.dumps(new_task_data)
-                    r.lpush(config.REDIS_MAIN_QUEUE, new_task_json)
-                    notify_task_retry(controller_task, current_attempt)
-                else:
-                    r.lrem(processing_queue, 1, task_json)
-                    r.lpush(config.REDIS_DEAD_LETTER_QUEUE, task_json)
-                    controller_task.status = "failed"
-                    session.commit()
-                    notify_task_failed(controller_task)
-        except Exception as e:
-            logging.error(f"Error handling stuck processing task: {e}")
-
-def reconcile_db_redis(session, r, redis_main_queue):
-    # Requeue any 'queued' tasks in DB but missing from Redis main/processing queues
+def reconcile_db_redis(session, r):
+    """
+    Requeue any 'queued' tasks in DB but missing from Redis main queue.
+    Only requeue eligible tasks, and ensure file_blob exists in Redis.
+    """
     logging.info("Reconciling DB and Redis queue for 'queued' tasks...")
 
     main_queue_tasks = set(r.lrange(config.REDIS_MAIN_QUEUE, 0, -1))
-    processing_queue_tasks = set(r.lrange(config.REDIS_PROCESSING_QUEUE, 0, -1))
 
-    tasks = session.query(ControllerTask).filter_by(status="queued").all()
+    tasks = session.query(ControllerTask).filter_by(status=STATUS_QUEUED).all()
     requeued_count = 0
     for task in tasks:
+        # Only requeue eligible tasks
+        if task.status not in [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING, STATUS_QUEUED]:
+            continue
+
         task_data = build_task_data_for_redis(task)
         task_json = json.dumps(task_data)
-        if (task_json not in main_queue_tasks) and (task_json not in processing_queue_tasks):
+        if task_json not in main_queue_tasks:
+            # Ensure file_blob is present in Redis before requeue
+            if not ensure_file_blob_in_redis(r, task, session):
+                continue  # file_blob missing and cannot be restored, already marked as failed
             r.lpush(config.REDIS_MAIN_QUEUE, task_json)
             requeued_count += 1
     if requeued_count:
         logging.info(f"Requeued {requeued_count} queued tasks to Redis main queue.")
 
 def main():
+    # Only use REDIS_MAIN_QUEUE for all queue operations
     r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
     while True:
         try:
             with get_db() as session:
                 # --- Handle Stuck Tasks in DB ---
+                # Identify tasks that have not progressed for a threshold time.
                 stuck_tasks = get_stuck_tasks(session, threshold_minutes=config.JOB_STUCK_THRESHOLD_MINUTES)
                 for task in stuck_tasks:
-                    notify_stuck_task(task)
                     current_attempt = (task.attempt_count or 0)
                     max_attempts = task.max_attempts or 1
+
+                    # Only requeue eligible tasks (not terminal)
+                    if task.status not in [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING]:
+                        logging.info(f"Skipping terminal stuck task {task.id} (status: {task.status})")
+                        continue
+
+                    notify_stuck_task(task)
                     if current_attempt + 1 < max_attempts:
+                        # Ensure file_blob is present in Redis before requeue
+                        if not ensure_file_blob_in_redis(r, task, session):
+                            continue  # file_blob missing and cannot be restored, already marked as failed
+
                         requeue_task(session, task)
                         logging.warning(
                             f"Task {task.id} ({task.file_path}) stuck for over {config.JOB_STUCK_THRESHOLD_MINUTES} min. Retrying (attempt {current_attempt + 1}/{max_attempts})."
@@ -175,15 +189,13 @@ def main():
                         task_json = json.dumps(task_data)
                         r.lpush(config.REDIS_MAIN_QUEUE, task_json)
                     else:
-                        task.status = "failed"
+                        # Max attempts reached, mark as failed
+                        task.status = STATUS_FAILED
                         session.commit()
                         logging.warning(
                             f"Task {task.id} ({task.file_path}) permanently failed after {max_attempts} attempts."
                         )
                         notify_task_failed(task)
-
-                # --- Handle Stuck Tasks in Processing Queue ---
-                handle_processing_queue_stuck_tasks(r, session)
 
                 # --- Handle Inactive Workers ---
                 inactive_workers = get_inactive_workers(
@@ -196,10 +208,11 @@ def main():
                     notify_inactive_worker(worker_id, config.WORKER_INACTIVE_THRESHOLD_MINUTES)
 
                 # --- Reconcile DB and Redis queue ---
-                reconcile_db_redis(session, r, config.REDIS_MAIN_QUEUE)
+                reconcile_db_redis(session, r)
 
         except Exception as e:
-            logging.error("Supervisor error: %s", e)
+            import traceback
+            logging.error(f"Supervisor error: {e}\n{traceback.format_exc()}")
             subject = "[Supervisor Error]"
             body = f"Supervisor encountered an error: {e}"
             send_email(subject, body)

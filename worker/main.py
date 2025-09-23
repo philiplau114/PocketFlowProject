@@ -12,8 +12,7 @@ import traceback
 import pymysql
 from config import (
     MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE,
-    REDIS_HOST, REDIS_PORT, REDIS_MAIN_QUEUE, REDIS_PROCESSING_QUEUE,
-    REDIS_DEAD_LETTER_QUEUE, WORKER_ID,
+    REDIS_HOST, REDIS_PORT, REDIS_MAIN_QUEUE, WORKER_ID,
     UIPATH_CLI, UIPATH_WORKFLOW, UIPATH_JOB_MAX_SECONDS, UIPATH_KILL_FILE, UIPATH_MT4_LIB, UIPATH_CONFIG,
     OUTPUT_JSON_DIR, OUTPUT_JSON_POLL_INTERVAL, OUTPUT_JSON_WARNING_MODULUS
 )
@@ -49,8 +48,12 @@ def main():
     while True:
         try:
             logger.debug(f"Waiting for task from Redis main queue: {REDIS_MAIN_QUEUE}")
-            # Atomically move task from main to processing queue
-            task_json = r.rpoplpush(REDIS_MAIN_QUEUE, REDIS_PROCESSING_QUEUE)
+            # removed processing queue
+            #task_json = r.rpoplpush(REDIS_MAIN_QUEUE, REDIS_PROCESSING_QUEUE)
+
+            # Use main queue to pop task
+            task_json = r.rpop(REDIS_MAIN_QUEUE)
+
             if not task_json:
                 logger.debug("No task found in Redis main queue, sleeping 5 seconds.")
                 time.sleep(5)
@@ -316,20 +319,21 @@ def main():
                 except Exception as e:
                     logging.error(f"Error setting up DB sync connection for worker_job_id={out_worker_JobId}: {e}")
 
-            # --- Remove input blob key from Redis ---
-            if input_blob_key:
-                try:
-                    r.delete(input_blob_key)
-                    logger.debug(f"Deleted input blob key {input_blob_key} from Redis after task {task_id} completion.")
-                except Exception as del_err:
-                    logging.warning(f"Failed to delete input blob key {input_blob_key} from Redis: {del_err}")
+            # --- worker will not remove input blob key from Redis, but use rpop to remove task from beginning ---
+            # if input_blob_key:
+            #     try:
+            #         r.delete(input_blob_key)
+            #         logger.debug(f"Deleted input blob key {input_blob_key} from Redis after task {task_id} completion.")
+            #     except Exception as del_err:
+            #         logging.warning(f"Failed to delete input blob key {input_blob_key} from Redis: {del_err}")
 
             # --- Remove the task from the processing queue after finishing (success or fail) ---
-            try:
-                r.lrem(REDIS_PROCESSING_QUEUE, 1, task_json)
-                logger.debug(f"Removed task {task_id} from processing queue after completion.")
-            except Exception as e:
-                logger.warning(f"Failed to remove task {task_id} from processing queue: {e}")
+            # Removed processing queue usage
+            # try:
+            #     r.lrem(REDIS_PROCESSING_QUEUE, 1, task_json)
+            #     logger.debug(f"Removed task {task_id} from processing queue after completion.")
+            # except Exception as e:
+            #     logger.warning(f"Failed to remove task {task_id} from processing queue: {e}")
 
         except Exception as e:
             logging.error("Worker loop error: %s", e)

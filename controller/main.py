@@ -38,6 +38,26 @@ logging.basicConfig(level=logging.INFO)
 
 stop_flag = False
 
+import logging
+
+
+def handle_terminal_task(r, task):
+    """
+    Handles cleanup for tasks reaching terminal status.
+    - Deletes file_blob from Redis.
+    - No queue cleanup needed (worker already removes from queue).
+
+    Args:
+        r: Redis client instance.
+        task: Task object with attribute input_blob_key.
+    """
+    if hasattr(task, "input_blob_key") and task.input_blob_key:
+        try:
+            r.delete(task.input_blob_key)
+            logging.info(f"Deleted file_blob {task.input_blob_key} for completed/failed task {task.id}")
+        except Exception as e:
+            logging.warning(f"Failed to delete file_blob {task.input_blob_key} for task {task.id}: {e}")
+
 def handle_stop_signal(sig, frame):
     global stop_flag
     logging.info("Received stop signal, will exit after this iteration.")
@@ -119,20 +139,20 @@ def main_loop():
         # --- WATCH_FOLDER LOGIC ---
         for file in Path(config.WATCH_FOLDER).glob("*.set"):
             try:
-                print(f"DEBUG: Processing file: {file}")
+                logging.debug(f"Processing file: {file}")
                 meta = extract_setfile_metadata(str(file))
-                print(f"DEBUG: Metadata extracted: {meta}")
+                logging.debug(f"Metadata extracted: {meta}")
                 with get_db() as session:
                     job_id, task_id, is_new = insert_job_and_task(session, meta, str(file), user_id=config.USER_ID)
-                    print(f"DEBUG: job_id={job_id}, task_id={task_id}, is_new={is_new}")
+                    logging.debug(f"job_id={job_id}, task_id={task_id}, is_new={is_new}")
                     if not is_new:
-                        print(f"DEBUG: Skipping {file} as job/task already exists.")
+                        logging.debug(f"Skipping {file} as job/task already exists.")
                         continue
                     with open(file, "rb") as f:
                         file_blob = f.read()
-                    print(f"DEBUG: Read file blob ({len(file_blob)} bytes)")
+                    logging.debug(f"Read file blob ({len(file_blob)} bytes)")
                     task = session.query(ControllerTask).get(task_id)
-                    print(f"DEBUG: Task fetched: {task}")
+                    logging.debug(f"Task fetched: {task}")
                     task.file_blob = file_blob
                     # DO NOT set status to 'queued' here; keep as STATUS_NEW
                     session.commit()
@@ -140,7 +160,7 @@ def main_loop():
                 #shutil.move(str(file), str(config.PROCESSED_FOLDER / file.name))
                 shutil.move(str(file), os.path.join(config.PROCESSED_FOLDER, file.name))
                 logging.info(f"Moved processed file {file.name} to {config.PROCESSED_FOLDER}")
-                print(f"DEBUG: Task for file {file.name} processed and ready for queueing.")
+                logging.debug(f"Task for file {file.name} processed and ready for queueing.")
                 logging.info("Created new task: %s (using file_blob)", file.name)
             except Exception as e:
                 error_msg = f"Failed to process file {file.name}: {e}"
@@ -158,40 +178,78 @@ def main_loop():
                     ControllerTask.status.in_([STATUS_WORKER_COMPLETED, STATUS_WORKER_FAILED])
                 ).all()
                 for task in finished_tasks:
+                    # If job already has a successful task, skip further transitions for this task.
                     if job_has_success(session, task.job_id):
                         logging.info(
                             f"Job {task.job_id} already has a successful task. Skipping retry/fine-tune for task {task.id}.")
                         continue
 
+                    terminal_status = False
+
                     if task.status == STATUS_WORKER_COMPLETED:
-                        task_ids = [task.id]
-                        metrics_map = get_task_metric_scores(session, task_ids)
-                        m = metrics_map.get(task.id, {})
-                        task._distance = m.get('distance')
-                        task._score = m.get('score')
-                        if (task._distance is not None and task._distance <= config.DISTANCE_THRESHOLD) and \
-                           (task._score is not None and task._score >= config.SCORE_THRESHOLD):
+                        # Fetch all metrics for this task (may be a list)
+                        metrics_map = get_task_metric_scores(session, [task.id])
+                        metrics = metrics_map.get(task.id, [])
+                        if not isinstance(metrics, list):
+                            metrics = [metrics]
+
+                        # Flag to track if any metric met success or partial criteria
+                        success = False
+                        partial = False
+
+                        for m in metrics:
+                            score = m.get('score')
+                            distance = m.get('distance')
+                            logging.info(f"Task {task.id} metric: score={score}, distance={distance}")
+
+                            # Case 1: Success -- any metric meets BOTH thresholds
+                            if (score is not None and score >= config.SCORE_THRESHOLD) and \
+                               (distance is not None and distance <= config.DISTANCE_THRESHOLD):
+                                success = True
+                                break
+                            # Case 2: Partial -- any metric meets EITHER threshold
+                            elif (score is not None and score >= config.SCORE_THRESHOLD) or \
+                                 (distance is not None and distance <= config.DISTANCE_THRESHOLD):
+                                partial = True
+                                # Don't break; keep searching for a possible success metric
+
+                        if success:
                             mark_task_success(session, task)
-                        elif (task._distance is not None and task._distance <= config.DISTANCE_THRESHOLD) or \
-                             (task._score is not None and task._score >= config.SCORE_THRESHOLD):
+                            terminal_status = True
+                            logging.info(f"Task {task.id} marked as SUCCESS (at least one metric passed both thresholds).")
+                        elif partial:
                             mark_task_partial(session, task)
-                            if (task.fine_tune_depth or 0) < config.MAX_FINE_TUNE_DEPTH:
-                                child = spawn_fine_tune_task(session, task)
-                                queue_task_to_redis(r, child)
+                            terminal_status = True
+                            logging.info(f"Task {task.id} marked as PARTIAL (at least one metric passed one threshold).")
+                            # Fine-tune child will be handled in the queueing logic (not here).
                         else:
+                            # Case 3: Fail/Retry -- no metrics passed
                             if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
                                 mark_task_retrying(session, task)
+                                logging.info(f"Task {task.id} marked as RETRY: no metrics passed.")
                             else:
                                 mark_task_failed(session, task, reason="Max attempts reached after worker_completed")
+                                terminal_status = True
+                                logging.info(f"Task {task.id} marked as FAILED: no metrics passed and max attempts reached.")
+
                         session.commit()
                         update_job_status(session, task.job_id)
+
                     elif task.status == STATUS_WORKER_FAILED:
+                        # Case 4: Worker failed, retry or fail
                         if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
                             mark_task_retrying(session, task)
+                            logging.info(f"Task {task.id} marked as RETRY after worker failure.")
                         else:
                             mark_task_failed(session, task, reason="Worker failure and max attempts reached")
+                            terminal_status = True
+                            logging.info(f"Task {task.id} marked as FAILED: worker failure and max attempts reached.")
                         session.commit()
                         update_job_status(session, task.job_id)
+
+                    # If task reached a terminal status (success, partial, failed), clean up resources
+                    if terminal_status:
+                        handle_terminal_task(r, task)
 
         except Exception as ex:
             logging.error(f"Error in post-worker status handling: {ex}")
@@ -201,29 +259,29 @@ def main_loop():
             with get_db() as session:
                 now = datetime.utcnow()
                 eligible_status = [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING]
-                print(f"DEBUG: Querying tasks with eligible_status={eligible_status}")
+                logging.debug(f"Querying tasks with eligible_status={eligible_status}")
                 tasks = session.query(ControllerTask).filter(
                     ControllerTask.status.in_(eligible_status)
                 ).all()
-                print(f"DEBUG: Retrieved {len(tasks)} eligible tasks")
+                logging.debug(f"Retrieved {len(tasks)} eligible tasks")
                 if not tasks:
                     logging.info("No tasks eligible for queueing.")
                     time.sleep(POLL_INTERVAL)
                     continue
 
                 task_ids = [t.id for t in tasks]
-                print(f"DEBUG: task_ids: {task_ids} (types: {[type(ti) for ti in task_ids]})")
+                logging.debug(f"task_ids: {task_ids} (types: {[type(ti) for ti in task_ids]})")
                 metrics_map = get_task_metric_scores(session, task_ids)
-                print(f"DEBUG: metrics_map: {metrics_map}")
+                logging.debug(f"metrics_map: {metrics_map}")
 
                 scored_tasks = []
                 for t in tasks:
-                    print(f"DEBUG: Scoring task id={t.id} (type={type(t.id)})")
+                    logging.debug(f"Scoring task id={t.id} (type={type(t.id)})")
                     m = metrics_map.get(t.id, {})
                     t._distance = m.get('distance')
                     t._score = m.get('score')
                     t._priority = hybrid_priority(t)
-                    print(f"DEBUG: Task {t.id} scored: distance={t._distance}, score={t._score}, priority={t._priority}")
+                    logging.debug(f"Task {t.id} scored: distance={t._distance}, score={t._score}, priority={t._priority}")
                     scored_tasks.append(t)
 
                 queueable_status = [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING]
@@ -235,7 +293,7 @@ def main_loop():
                     and not job_has_success(session, t.job_id)  # <-- add this line
                 ]
 
-                print(f"DEBUG: Found {len(queueable)} queueable tasks")
+                logging.debug(f"Found {len(queueable)} queueable tasks")
                 new_tasks = [t for t in queueable if t.status == STATUS_NEW]
                 other_tasks = [t for t in queueable if t.status != STATUS_NEW]
 
@@ -246,9 +304,9 @@ def main_loop():
                 fill_count = BATCH_SIZE - len(batch)
                 batch += other_tasks[:fill_count]
 
-                print(f"DEBUG: Batch to queue (length={len(batch)}): {[t.id for t in batch]}")
+                logging.debug(f"Batch to queue (length={len(batch)}): {[t.id for t in batch]}")
                 for task in batch:
-                    print(f"DEBUG: Preparing to queue task id={task.id}, type={type(task.id)}, job_id={task.job_id}, type(job_id)={type(task.job_id)}")
+                    logging.debug(f"Preparing to queue task id={task.id}, type={type(task.id)}, job_id={task.job_id}, type(job_id)={type(task.job_id)}")
                     old_status = task.status
                     task.status = STATUS_QUEUED
                     task.updated_at = datetime.utcnow()
@@ -256,9 +314,9 @@ def main_loop():
                         task.attempt_count = (task.attempt_count or 0) + 1
                     session.commit()
                     update_job_status(session, task.job_id)
-                    print(f"DEBUG: Committed task id={task.id}, now queuing to Redis")
+                    logging.debug(f"Committed task id={task.id}, now queuing to Redis")
                     queue_task_to_redis(r, task)
-                    print(f"DEBUG: Queued task id={task.id} to Redis")
+                    logging.debug(f"Queued task id={task.id} to Redis")
 
             time.sleep(POLL_INTERVAL)
         except Exception as e:
