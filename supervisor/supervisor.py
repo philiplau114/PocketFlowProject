@@ -13,20 +13,11 @@ from db_utils import (
 )
 from notify import send_email, send_telegram
 import config
-from db.status_constants import (
-    STATUS_NEW,
-    STATUS_RETRYING,
-    STATUS_FINE_TUNING,
-    STATUS_COMPLETED_SUCCESS,
-    STATUS_COMPLETED_PARTIAL,
-    STATUS_FAILED,
-    STATUS_QUEUED,
-)
 
 logging.basicConfig(level=logging.INFO)
 
 def notify_task_retry(task, attempt_count):
-    # Notify on task retry attempt via email and telegram
+    # Notify about a task retry attempt
     subject = f"[Task Retry] {task.file_path or '(unknown)'} | Task ID: {task.id}"
     body = (
         f"Task for set file: {task.file_path or '(unknown)'}\n"
@@ -75,7 +66,7 @@ def notify_inactive_worker(worker_id, minutes):
 
 def build_task_data_for_redis(task):
     """
-    Builds a task JSON dict for Redis queue, consistent with controller_utils.queue_task_to_redis.
+    Build a task JSON dict for Redis queue, consistent with controller_utils.queue_task_to_redis.
     """
     ea_name = None
     symbol = None
@@ -105,9 +96,9 @@ def build_task_data_for_redis(task):
 
 def ensure_file_blob_in_redis(r, task, session):
     """
-    Ensure file_blob for a task exists in Redis before re-queueing.
-    If missing, restores from DB if possible.
-    If file_blob cannot be restored, marks the task as failed.
+    Ensure the file_blob for a task exists in Redis before re-queueing.
+    If missing, restore from DB if possible.
+    If file_blob cannot be restored, mark the task as failed.
     Returns True if file_blob is present in Redis after this call, else False.
     """
     file_blob_key = f"task:{task.id}:input_blob"
@@ -120,7 +111,7 @@ def ensure_file_blob_in_redis(r, task, session):
             return True
         else:
             # Cannot restore, mark as failed and log/notify
-            task.status = STATUS_FAILED
+            task.status = "failed"
             task.last_error = "Missing file_blob in Redis and DB"
             session.commit()
             logging.error(f"Failed to restore missing file_blob for task {task.id}; marked as failed")
@@ -137,11 +128,11 @@ def reconcile_db_redis(session, r):
 
     main_queue_tasks = set(r.lrange(config.REDIS_MAIN_QUEUE, 0, -1))
 
-    tasks = session.query(ControllerTask).filter_by(status=STATUS_QUEUED).all()
+    tasks = session.query(ControllerTask).filter_by(status="queued").all()
     requeued_count = 0
     for task in tasks:
         # Only requeue eligible tasks
-        if task.status not in [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING, STATUS_QUEUED]:
+        if task.status not in ["new", "retrying", "fine_tuning", "queued"]:
             continue
 
         task_data = build_task_data_for_redis(task)
@@ -156,20 +147,18 @@ def reconcile_db_redis(session, r):
         logging.info(f"Requeued {requeued_count} queued tasks to Redis main queue.")
 
 def main():
-    # Only use REDIS_MAIN_QUEUE for all queue operations
     r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
     while True:
         try:
             with get_db() as session:
                 # --- Handle Stuck Tasks in DB ---
-                # Identify tasks that have not progressed for a threshold time.
                 stuck_tasks = get_stuck_tasks(session, threshold_minutes=config.JOB_STUCK_THRESHOLD_MINUTES)
                 for task in stuck_tasks:
                     current_attempt = (task.attempt_count or 0)
                     max_attempts = task.max_attempts or 1
 
                     # Only requeue eligible tasks (not terminal)
-                    if task.status not in [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING]:
+                    if task.status not in ["new", "retrying", "fine_tuning"]:
                         logging.info(f"Skipping terminal stuck task {task.id} (status: {task.status})")
                         continue
 
@@ -190,7 +179,7 @@ def main():
                         r.lpush(config.REDIS_MAIN_QUEUE, task_json)
                     else:
                         # Max attempts reached, mark as failed
-                        task.status = STATUS_FAILED
+                        task.status = "failed"
                         session.commit()
                         logging.warning(
                             f"Task {task.id} ({task.file_path}) permanently failed after {max_attempts} attempts."
