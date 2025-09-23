@@ -59,7 +59,7 @@ def link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id):
         if link_id != test_metrics_id:
             cursor.execute(update_sql, (test_metrics_id, link_id))
             count += 1
-    print(f"[DEBUG] Linked {count} artifacts to test_metrics for controller_task_id={controller_task_id}")
+    #print(f"[DEBUG] Linked {count} artifacts to test_metrics for controller_task_id={controller_task_id}")
     cursor.close()
 
 def sync_trade_records(step_id, test_metrics_id, ctrl_conn):
@@ -174,21 +174,21 @@ def sync_trade_records(step_id, test_metrics_id, ctrl_conn):
     agent_cursor.close()
     agent_conn.close()
     if not rows:
-        print(f"[DEBUG] No trade_records for step_id {step_id}.")
+        #print(f"[DEBUG] No trade_records for step_id {step_id}.")
         return
     ctrl_cursor = ctrl_conn.cursor()
-    print(f"[DEBUG] step_id {step_id} has {len(rows)} trade_records to sync.")
-    print(f"[DEBUG] test_metrics_id: {test_metrics_id}")
+    #print(f"[DEBUG] step_id {step_id} has {len(rows)} trade_records to sync.")
+    #print(f"[DEBUG] test_metrics_id: {test_metrics_id}")
     try:
         for idx, row in enumerate(rows):
             params = (test_metrics_id,) + tuple(row[col] for col in trade_record_columns)
-            print(f"[DEBUG] trade_records Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
+            #print(f"[DEBUG] trade_records Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
             if len(params) != 19:
                 print(f"[ERROR] trade_records Row {idx}: Mismatch! Param count: {len(params)}, Placeholders: 19.")
-            #print(f"[DEBUG] trade_records Row {idx}: Params: {params}, insert_sql: {insert_sql}")
+            ##print(f"[DEBUG] trade_records Row {idx}: Params: {params}, insert_sql: {insert_sql}")
             ctrl_cursor.execute(insert_sql, params)
-            #print(f"[DEBUG] trade_records Row {idx} inserted with ID {ctrl_cursor.lastrowid}")
-        print(f"[DEBUG] Copied {len(rows)} trade_records rows from agent step {step_id} to controller DB (test_metrics_id {test_metrics_id}).")
+            ##print(f"[DEBUG] trade_records Row {idx} inserted with ID {ctrl_cursor.lastrowid}")
+        #print(f"[DEBUG] Copied {len(rows)} trade_records rows from agent step {step_id} to controller DB (test_metrics_id {test_metrics_id}).")
     except Exception as e:
         print(f"[ERROR] Error during sync_trade_records (step_id {step_id}): {e}")
         raise
@@ -405,21 +405,21 @@ def sync_test_metrics(worker_job_id, ctrl_conn):
     agent_cursor.close()
     agent_conn.close()
     if not rows:
-        print(f"[DEBUG] No test_metrics found for worker_job_id {worker_job_id}.")
+        #print(f"[DEBUG] No test_metrics found for worker_job_id {worker_job_id}.")
         return
     ctrl_cursor = ctrl_conn.cursor()
     try:
         for idx, row in enumerate(rows):
             params = tuple(row[col] for col in target_columns)
-            print(f"[DEBUG] test_metrics Row {idx}: Columns used: {target_columns[:3]}... (total {len(target_columns)})")
-            print(f"[DEBUG] test_metrics Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
+            #print(f"[DEBUG] test_metrics Row {idx}: Columns used: {target_columns[:3]}... (total {len(target_columns)})")
+            #print(f"[DEBUG] test_metrics Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
             if len(params) != 62:
                 print(f"[ERROR] test_metrics Row {idx}: Mismatch! Param count: {len(params)}, Placeholders: 62.")
             ctrl_cursor.execute(insert_sql, params)
             test_metrics_id = ctrl_cursor.lastrowid
             if 'step_id' in row.keys():
                 sync_trade_records(row['step_id'], test_metrics_id, ctrl_conn)
-        print(f"[DEBUG] Copied {len(rows)} test_metrics rows from agent job {worker_job_id} to controller DB.")
+        #print(f"[DEBUG] Copied {len(rows)} test_metrics rows from agent job {worker_job_id} to controller DB.")
     except Exception as e:
         print(f"[ERROR] Error during sync_test_metrics: {e}")
         raise
@@ -484,16 +484,16 @@ def sync_artifacts(worker_job_id, ctrl_conn):
                 link_type,
                 link_id,
             )
-            print(f"[DEBUG] controller_artifacts Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
+            #print(f"[DEBUG] controller_artifacts Row {idx}: Param count: {len(params)}, First 3 values: {params[:3]}")
             if len(params) != 8:
                 print(f"[ERROR] controller_artifacts Row {idx}: Mismatch! Param count: {len(params)}, Placeholders: 8.")
             ctrl_cursor.execute(insert_sql, params)
-        print(f"[DEBUG] Copied {len(rows)} artifact rows from agent job {worker_job_id} to controller DB.")
+        #print(f"[DEBUG] Copied {len(rows)} artifact rows from agent job {worker_job_id} to controller DB.")
         if controller_task_id:
             #with controller_db_session() as session:
             #    link_artifacts_to_test_metrics_for_task(session, controller_task_id)
             link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id)
-            print(f"[DEBUG] Linked artifacts to test_metrics for controller_task_id={controller_task_id}")
+            #print(f"[DEBUG] Linked artifacts to test_metrics for controller_task_id={controller_task_id}")
     except Exception as e:
         print(f"[ERROR] Error during artifact sync: {e}")
         raise
@@ -588,7 +588,7 @@ def sync_ai_suggestions(worker_job_id, ctrl_conn):
             created_at=VALUES(created_at)
         """
         for idx, row in enumerate(suggestion_rows):
-            print(f"[DEBUG] controller_ai_suggestions Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
+            #print(f"[DEBUG] controller_ai_suggestions Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
             if len(row) != 6:
                 print(f"[ERROR] controller_ai_suggestions Row {idx}: Mismatch! Param count: {len(row)}, Placeholders: 6.")
             ctrl_cursor.execute(insert_suggestion_sql, row)
@@ -605,7 +605,7 @@ def sync_ai_suggestions(worker_job_id, ctrl_conn):
             explanation=VALUES(explanation)
         """
         for idx, row in enumerate(section_rows):
-            print(f"[DEBUG] optimization_section Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
+            #print(f"[DEBUG] optimization_section Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
             if len(row) != 4:
                 print(f"[ERROR] optimization_section Row {idx}: Mismatch! Param count: {len(row)}, Placeholders: 4.")
             ctrl_cursor.execute(insert_section_sql, row)
@@ -628,11 +628,11 @@ def sync_ai_suggestions(worker_job_id, ctrl_conn):
             reason=VALUES(reason)
         """
         for idx, row in enumerate(parameter_rows):
-            print(f"[DEBUG] optimization_parameter Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
+            #print(f"[DEBUG] optimization_parameter Row {idx}: Param count: {len(row)}, First 3 values: {row[:3]}")
             if len(row) != 7:
                 print(f"[ERROR] optimization_parameter Row {idx}: Mismatch! Param count: {len(row)}, Placeholders: 7.")
             ctrl_cursor.execute(insert_parameter_sql, row)
-        print(f"[DEBUG] Copied {len(suggestion_rows)} suggestions, {len(section_rows)} sections, {len(parameter_rows)} parameters from agent job {worker_job_id} to controller DB.")
+        #print(f"[DEBUG] Copied {len(suggestion_rows)} suggestions, {len(section_rows)} sections, {len(parameter_rows)} parameters from agent job {worker_job_id} to controller DB.")
     except Exception as e:
         print(f"[ERROR] Error during AI suggestions sync: {e}")
         raise
