@@ -57,7 +57,7 @@ with engine.connect() as conn:
     else:
         st.info("No dynamic thresholds found. Using .env.controller values.")
         st.write({
-            "MAX_ATTEMPTS": config.MAX_ATTEMPTS,
+            "MAX_ATTEMPTS": config.TASK_MAX_ATTEMPTS,
             "MAX_FINE_TUNE_DEPTH": config.MAX_FINE_TUNE_DEPTH,
             "DISTANCE_THRESHOLD": config.DISTANCE_THRESHOLD,
             "SCORE_THRESHOLD": config.SCORE_THRESHOLD,

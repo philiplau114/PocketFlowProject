@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 from db.db_models import User
 from db_utils import get_db, create_user, fetch_user_by_username
@@ -33,7 +36,8 @@ def login_page():
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     if st.button("Login"):
-        session_token, error = login(username, password)
+        session = get_db()  # Get the database session
+        session_token, error = login(session, username, password)  # Pass session as first argument
         if session_token:
             st.success("Login successful!")
             st.session_state['session_token'] = session_token

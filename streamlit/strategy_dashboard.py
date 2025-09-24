@@ -4,9 +4,8 @@ import sqlalchemy
 import sys
 import os
 from io import BytesIO
-from db_utils import get_db, store_set_file_summary
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db_utils import get_db, store_set_file_summary
 import config
 import redis
 
