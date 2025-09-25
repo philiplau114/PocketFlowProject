@@ -33,7 +33,12 @@ st.markdown("Welcome to PocketFlow! Select a page from the navigation below:")
 # Sidebar and logout enhancement
 if is_logged_in():
     with st.sidebar:
-        options = ["Strategy Dashboard", "Portfolio Management", "Settings / Profile"]
+        options = [
+            "Strategy Dashboard",
+            "Portfolio Management",
+            "Portfolio Reviewer (AI)",  # NEW PAGE
+            "Settings / Profile"
+        ]
         if is_admin():
             options += ["Controller Dashboard", "Admin Approval / Audit Log"]
         page = st.radio("Go to page:", options)
@@ -68,6 +73,17 @@ elif page == "Portfolio Management":
         st.query_params["page"] = "portfolio_management"
         with st.spinner("Loading Portfolio Management..."):
             import_module_from_file("portfolio_management", os.path.join("user_management", "portfolio_management.py"))
+
+elif page == "Portfolio Reviewer (AI)":
+    if not is_standard_user():
+        st.error("You must be a Standard/Trader user to access this page.")
+    else:
+        st.query_params["page"] = "portfolio_reviewer_app"
+        with st.spinner("Loading Portfolio Reviewer (AI)..."):
+            import_module_from_file(
+                "portfolio_reviewer_app",
+                os.path.join("portfolio_analysis", "portfolio_reviewer_app_gpt4o.py")
+            )
 
 elif page == "Settings / Profile":
     st.query_params["page"] = "settings_profile"

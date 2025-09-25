@@ -277,16 +277,6 @@ def main():
 
             status = STATUS_WORKER_COMPLETED if (out_Status and out_Status.lower() == "completed") else STATUS_WORKER_FAILED
             logger.debug(f"Finalizing task {task_id} in DB with status: {status}, error_message: {error_message}")
-            with get_db() as session:
-                update_task_status(session, task_id, status)
-                update_task_heartbeat(session, task_id)
-                finish_attempt(session, attempt_id, status, error_message, result_json_blob)
-                if out_worker_JobId:
-                    try:
-                        update_task_worker_job(session, task_id, int(out_worker_JobId))
-                        logging.info(f"Updated worker_job_id={out_worker_JobId} for controller task {task_id}")
-                    except Exception as e:
-                        logging.warning(f"Failed to update worker_job_id for task {task_id}: {e}")
 
             # --- DB sync block: use ONE MySQL connection for all syncs ---
             if status == STATUS_WORKER_COMPLETED and out_worker_JobId:
@@ -318,6 +308,18 @@ def main():
 
                 except Exception as e:
                     logging.error(f"Error setting up DB sync connection for worker_job_id={out_worker_JobId}: {e}")
+
+            #Update task and attempt status in main DB after sync
+            with get_db() as session:
+                update_task_status(session, task_id, status)
+                update_task_heartbeat(session, task_id)
+                finish_attempt(session, attempt_id, status, error_message, result_json_blob)
+                if out_worker_JobId:
+                    try:
+                        update_task_worker_job(session, task_id, int(out_worker_JobId))
+                        logging.info(f"Updated worker_job_id={out_worker_JobId} for controller task {task_id}")
+                    except Exception as e:
+                        logging.warning(f"Failed to update worker_job_id for task {task_id}: {e}")
 
             # --- worker will not remove input blob key from Redis, but use rpop to remove task from beginning ---
             # if input_blob_key:

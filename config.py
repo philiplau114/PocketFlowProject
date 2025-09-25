@@ -104,3 +104,6 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RELOAD_INTERVAL = int(os.getenv('RELOAD_INTERVAL', 60))  # default to 60 seconds if not set
+
+LOCK_RETRY_COUNT = int(os.getenv('LOCK_RETRY_COUNT', 5))
+LOCK_RETRY_SLEEP = float(os.getenv('LOCK_RETRY_SLEEP', 1))

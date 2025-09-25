@@ -1,7 +1,10 @@
 import os
 import sys
-from sqlalchemy import create_engine, and_
+import time
+import logging
+from sqlalchemy import create_engine, and_, text
 from sqlalchemy.orm import sessionmaker, joinedload
+from sqlalchemy.exc import OperationalError
 import pandas as pd
 from datetime import datetime, timedelta
 from db.db_models import (
@@ -17,7 +20,9 @@ from db.status_constants import (
     STATUS_WORKER_FAILED, STATUS_RETRYING, STATUS_FINE_TUNING, STATUS_COMPLETED_SUCCESS,
     STATUS_COMPLETED_PARTIAL, STATUS_FAILED,
 )
-from config import SQLALCHEMY_DATABASE_URL, SYMBOL_CSV_PATH
+from config import (
+    SQLALCHEMY_DATABASE_URL, SYMBOL_CSV_PATH, LOCK_RETRY_COUNT, LOCK_RETRY_SLEEP
+)
 
 # Import the actual set file field extractor
 from config import MT4_OPTIMIZER_PATH
@@ -33,6 +38,20 @@ SYMBOL_LIST = extract_setfilename_fields.load_symbol_list(SYMBOL_CSV_PATH)
 def get_db():
     return SessionLocal()
 
+def safe_commit(session):
+    for attempt in range(LOCK_RETRY_COUNT):
+        try:
+            session.commit()
+            return
+        except OperationalError as e:
+            logging.error(f"DB commit failed (attempt {attempt+1}/{LOCK_RETRY_COUNT}): {e}")
+            if "Lock wait timeout exceeded" in str(e):
+                session.rollback()
+                time.sleep(LOCK_RETRY_SLEEP * (attempt + 1))
+            else:
+                raise
+    raise RuntimeError("Failed to commit after lock timeout retries.")
+
 def extract_setfile_metadata(setfile_path):
     fields = extract_setfilename_fields.extract_fields(setfile_path, SYMBOL_LIST)
     return {
@@ -40,8 +59,6 @@ def extract_setfile_metadata(setfile_path):
         "symbol": fields.get("Symbol", ""),
         "timeframe": fields.get("Timeframe", ""),
     }
-
-# --- Existing job/task helpers unchanged ---
 
 def insert_job_and_task(session, meta, set_file_path, user_id="system"):
     existing_job = session.query(ControllerJob).filter_by(
@@ -66,7 +83,7 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
         attempt_count=0,
     )
     session.add(job)
-    session.commit()
+    safe_commit(session)
     task = ControllerTask(
         job_id=job.id,
         step_number=1,
@@ -79,7 +96,7 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
         max_attempts=1,
     )
     session.add(task)
-    session.commit()
+    safe_commit(session)
     return job.id, task.id, True
 
 def job_has_success(session, job_id):
@@ -89,7 +106,7 @@ def job_has_success(session, job_id):
     ).count() > 0
 
 def update_job_status(session, job_id):
-    job = session.query(ControllerJob).filter(ControllerJob.id == job_id).first()
+    job = session.query(ControllerJob).filter(ControllerJob.id == job_id).with_for_update().first()
     if not job:
         return
     tasks = session.query(ControllerTask).filter(ControllerTask.job_id == job_id).all()
@@ -117,22 +134,22 @@ def update_job_status(session, job_id):
             new_status = JOB_STATUS_FAILED
     if job.status != new_status:
         job.status = new_status
-        session.commit()
+        safe_commit(session)
 
 def update_task_status(session, task_id, status, assigned_worker=None):
-    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).first()
+    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).with_for_update().first()
     if task:
         task.status = status
         if assigned_worker is not None:
             task.assigned_worker = assigned_worker
         task.updated_at = datetime.utcnow()
-        session.commit()
+        safe_commit(session)
 
 def update_task_worker_job(session, task_id, worker_job_id):
-    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).first()
+    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).with_for_update().first()
     if task:
         task.worker_job_id = worker_job_id
-        session.commit()
+        safe_commit(session)
 
 def create_attempt(session, task_id, status=STATUS_WORKER_IN_PROGRESS):
     last_attempt = session.query(ControllerAttempt).filter(
@@ -146,23 +163,23 @@ def create_attempt(session, task_id, status=STATUS_WORKER_IN_PROGRESS):
         started_at=datetime.utcnow()
     )
     session.add(attempt)
-    session.commit()
+    safe_commit(session)
     return attempt.id
 
 def finish_attempt(session, attempt_id, status, error_message=None, result_json=None):
-    attempt = session.query(ControllerAttempt).filter(ControllerAttempt.id == attempt_id).first()
+    attempt = session.query(ControllerAttempt).filter(ControllerAttempt.id == attempt_id).with_for_update().first()
     if attempt:
         attempt.status = status
         attempt.finished_at = datetime.utcnow()
         attempt.error_message = error_message
         attempt.result_json = result_json
-        session.commit()
+        safe_commit(session)
 
 def update_task_heartbeat(session, task_id):
-    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).first()
+    task = session.query(ControllerTask).filter(ControllerTask.id == task_id).with_for_update().first()
     if task:
         task.last_heartbeat = datetime.utcnow()
-        session.commit()
+        safe_commit(session)
 
 def get_stuck_tasks(session, threshold_minutes=60):
     cutoff = datetime.utcnow() - timedelta(minutes=threshold_minutes)
@@ -172,21 +189,23 @@ def get_stuck_tasks(session, threshold_minutes=60):
     ).all()
 
 def requeue_task(session, task):
-    task.status = "failed"
-    session.commit()
-    new_task = ControllerTask(
-        job_id=task.job_id,
-        step_number=task.step_number,
-        step_name=task.step_name,
-        status="queued",
-        assigned_worker=None,
-        file_path=task.file_path,
-        description=task.description,
-        attempt_count=0,
-        max_attempts=task.max_attempts,
-    )
-    session.add(new_task)
-    session.commit()
+    locked_task = session.query(ControllerTask).filter(ControllerTask.id == task.id).with_for_update().first()
+    if locked_task and locked_task.status != "failed":
+        locked_task.status = "failed"
+        safe_commit(session)
+        new_task = ControllerTask(
+            job_id=locked_task.job_id,
+            step_number=locked_task.step_number,
+            step_name=locked_task.step_name,
+            status="queued",
+            assigned_worker=None,
+            file_path=locked_task.file_path,
+            description=locked_task.description,
+            attempt_count=0,
+            max_attempts=locked_task.max_attempts,
+        )
+        session.add(new_task)
+        safe_commit(session)
 
 def get_inactive_workers(session, threshold_minutes=5):
     cutoff = datetime.utcnow() - timedelta(minutes=threshold_minutes)
@@ -209,14 +228,14 @@ def insert_artifact(session, task_id, artifact_type, file_name, file_path, file_
         meta_json=meta_json
     )
     session.add(artifact)
-    session.commit()
+    safe_commit(session)
 
 def store_set_file_summary(session, metric_id, summary_md):
     artifact = session.query(ControllerArtifact).filter_by(
         artifact_type="set_file_summary",
         link_type="test_metrics",
         link_id=metric_id
-    ).first()
+    ).with_for_update().first()
     if artifact:
         artifact.file_blob = summary_md.encode("utf-8")
         artifact.file_name = f"set_file_summary_{metric_id}.md"
@@ -229,7 +248,7 @@ def store_set_file_summary(session, metric_id, summary_md):
             link_id=metric_id
         )
         session.add(artifact)
-    session.commit()
+    safe_commit(session)
 
 # --- User Management & AuditLog helpers (SQLAlchemy ORM style) ---
 
@@ -240,10 +259,10 @@ def fetch_user_by_id(session, user_id):
     return session.query(User).filter_by(id=user_id).first()
 
 def set_open_router_api_key(db_session, username, api_key):
-    user = db_session.query(User).filter_by(username=username).first()
+    user = db_session.query(User).filter_by(username=username).with_for_update().first()
     if user:
         user.open_router_api_key = api_key
-        db_session.commit()
+        safe_commit(db_session)
         return True
     return False
 
@@ -261,24 +280,24 @@ def create_user(session, username, email, password_hash, open_router_api_key=Non
         open_router_api_key=open_router_api_key
     )
     session.add(user)
-    session.commit()
+    safe_commit(session)
     return user.id
 
 def update_user_status(session, user_id, status, approved_by=None):
-    user = session.query(User).filter_by(id=user_id).first()
+    user = session.query(User).filter_by(id=user_id).with_for_update().first()
     if not user:
         return
     user.status = status
     if status == 'Approved':
         user.date_approved = datetime.utcnow()
         user.approved_by = approved_by
-    session.commit()
+    safe_commit(session)
 
 def change_user_role(session, user_id, new_role, admin_id):
-    user = session.query(User).filter_by(id=user_id).first()
+    user = session.query(User).filter_by(id=user_id).with_for_update().first()
     if user:
         user.role = new_role
-        session.commit()
+        safe_commit(session)
         log_action(session, admin_id, "Role Changed", target_id=user_id, details={"new_role": new_role})
 
 def log_action(session, user_id, action, target_id=None, details=None):
@@ -290,7 +309,7 @@ def log_action(session, user_id, action, target_id=None, details=None):
         details=details if details else None
     )
     session.add(log)
-    session.commit()
+    safe_commit(session)
 
 def get_audit_log(session, user_id=None, limit=100):
     query = session.query(AuditLog).order_by(AuditLog.timestamp.desc())
@@ -301,25 +320,19 @@ def get_audit_log(session, user_id=None, limit=100):
 # --- Portfolio Management ORM functions ---
 
 def get_user_portfolios(session, username):
-    """Return all portfolios for a user. Here we match by portfolio_name prefix; adjust if you store user_id or username in another field."""
     return session.query(Portfolio).filter(Portfolio.portfolio_name.like(f"{username}%")).all()
 
 def create_portfolio(session, username, portfolio_name, description=""):
-    """Create a new portfolio for user."""
     new_portfolio = Portfolio(
         portfolio_name=portfolio_name,
         description=description,
         meta_json=None
     )
     session.add(new_portfolio)
-    session.commit()
+    safe_commit(session)
     return new_portfolio
 
 def get_portfolio_strategies(session, portfolio_id):
-    """
-    Returns a pandas DataFrame of strategies in given portfolio,
-    using v_test_metrics_scored for scored fields.
-    """
     sql = text("""
         SELECT
             v.id AS metric_id,
@@ -348,28 +361,20 @@ def get_portfolio_strategies(session, portfolio_id):
     return df
 
 def add_strategy_to_portfolio(session, portfolio_id, metric_id):
-    """Add a strategy to a portfolio."""
     ps = PortfolioSet(portfolio_id=portfolio_id, test_metrics_id=metric_id)
     session.add(ps)
-    session.commit()
+    safe_commit(session)
     return True
 
 def remove_strategy_from_portfolio(session, portfolio_id, metric_id):
-    """Remove a strategy from a portfolio."""
-    ps = session.query(PortfolioSet).filter_by(portfolio_id=portfolio_id, test_metrics_id=metric_id).first()
+    ps = session.query(PortfolioSet).filter_by(portfolio_id=portfolio_id, test_metrics_id=metric_id).with_for_update().first()
     if ps:
         session.delete(ps)
-        session.commit()
+        safe_commit(session)
         return True
     return False
 
-from sqlalchemy import text
-
 def load_available_strategies(session):
-    """
-    Returns a pandas DataFrame of strategies from v_test_metrics_scored,
-    ordered by normalized_total_distance_to_good ASC, weighted_score DESC.
-    """
     sql = text("""
         SELECT
             id,
@@ -396,9 +401,6 @@ def load_available_strategies(session):
     return df
 
 def get_portfolio_symbols(session, portfolio_id):
-    """
-    Returns a list of symbols in the portfolio.
-    """
     sql = text("""
         SELECT DISTINCT v.symbol
         FROM Portfolio_Sets ps
@@ -409,15 +411,10 @@ def get_portfolio_symbols(session, portfolio_id):
     return [row[0] for row in rows]
 
 def get_portfolio_currency_correlation(session, portfolio_id, timeframe='H1'):
-    """
-    Returns a DataFrame of pairwise currency correlations for the given portfolio.
-    """
     symbols = get_portfolio_symbols(session, portfolio_id)
     if not symbols:
         return pd.DataFrame(columns=["symbol1", "symbol2", "correlation"])
-    # Compose tuple for SQL "IN"
     symbol_tuple = tuple(symbols)
-    # SQLAlchemy requires special syntax for tuple in IN clause
     placeholders = ','.join([':s'+str(i) for i in range(len(symbol_tuple))])
     params = {f's{i}': symbol for i, symbol in enumerate(symbol_tuple)}
     params.update({'tf': timeframe})
@@ -427,16 +424,11 @@ def get_portfolio_currency_correlation(session, portfolio_id, timeframe='H1'):
         WHERE timeframe = :tf
         AND symbol1 IN ({placeholders}) AND symbol2 IN ({placeholders})
     """)
-    # Pass params twice for both symbol1 and symbol2
     result = session.execute(sql, params)
     rows = result.fetchall()
     return pd.DataFrame(rows, columns=["symbol1", "symbol2", "correlation"])
 
 def aggregate_correlation(df):
-    """
-    Aggregates the correlation DataFrame to summarize risk:
-    - Returns average, max, and identifies highly correlated pairs (> 0.7).
-    """
     if df.empty:
         return {'average_correlation': None, 'max_correlation': None, 'high_corr_pairs': []}
     avg_corr = df['correlation'].mean()
