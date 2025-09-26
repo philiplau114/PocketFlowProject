@@ -319,11 +319,12 @@ def get_audit_log(session, user_id=None, limit=100):
 
 # --- Portfolio Management ORM functions ---
 
-def get_user_portfolios(session, username):
-    return session.query(Portfolio).filter(Portfolio.portfolio_name.like(f"{username}%")).all()
+def get_user_portfolios(session, user_id):
+    return session.query(Portfolio).filter_by(user_id=user_id).all()
 
-def create_portfolio(session, username, portfolio_name, description=""):
+def create_portfolio(session, user_id, portfolio_name, description=""):
     new_portfolio = Portfolio(
+        user_id=user_id,
         portfolio_name=portfolio_name,
         description=description,
         meta_json=None
@@ -410,8 +411,14 @@ def get_portfolio_symbols(session, portfolio_id):
     rows = session.execute(sql, {"portfolio_id": portfolio_id}).fetchall()
     return [row[0] for row in rows]
 
+def extract_symbol_code(symbol):
+    """Extracts the symbol code from a string like 'AUDCHF (Australian Dollar vs Swiss Franc)'."""
+    return symbol.split()[0] if symbol else symbol
+
 def get_portfolio_currency_correlation(session, portfolio_id, timeframe='H1'):
     symbols = get_portfolio_symbols(session, portfolio_id)
+    # Clean symbols to just the code
+    symbols = [extract_symbol_code(s) for s in symbols]
     if not symbols:
         return pd.DataFrame(columns=["symbol1", "symbol2", "correlation"])
     symbol_tuple = tuple(symbols)
@@ -433,9 +440,21 @@ def aggregate_correlation(df):
         return {'average_correlation': None, 'max_correlation': None, 'high_corr_pairs': []}
     avg_corr = df['correlation'].mean()
     max_corr = df['correlation'].max()
-    high_corr_pairs = df[df['correlation'] > 0.7][['symbol1', 'symbol2', 'correlation']].values.tolist()
+    # Exclude self-correlation
+    high_corr_pairs = df[
+        (df['correlation'] > 0.7) & (df['symbol1'] != df['symbol2'])
+    ][['symbol1', 'symbol2', 'correlation']].values.tolist()
+
+    # Deduplicate: only keep (A, B) where A < B (alphabetically)
+    deduped = []
+    seen = set()
+    for a, b, corr in high_corr_pairs:
+        key = tuple(sorted([a, b]))
+        if key not in seen:
+            deduped.append([key[0], key[1], corr])
+            seen.add(key)
     return {
         'average_correlation': avg_corr,
         'max_correlation': max_corr,
-        'high_corr_pairs': high_corr_pairs
+        'high_corr_pairs': deduped
     }

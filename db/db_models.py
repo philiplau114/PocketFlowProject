@@ -1,10 +1,7 @@
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Float, LargeBinary, BLOB, JSON
 )
-#from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import declarative_base
-#Base = declarative_base()
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
 Base = declarative_base()
@@ -24,16 +21,16 @@ class User(Base):
     approved_by = Column(Integer)
     profile_data = Column(JSON)
     open_router_api_key = Column(String(128), nullable=True)
+    portfolios = relationship("Portfolio", back_populates="user")
 
-    # Password helpers
     @staticmethod
     def hash_password(password: str) -> str:
         return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
     def verify_password(self, password):
-        # Example using bcrypt; replace with your hash check!
         import bcrypt
         return bcrypt.checkpw(password.encode(), self.password_hash.encode())
+
 
 class AuditLog(Base):
     __tablename__ = 'audit_log'
@@ -44,6 +41,7 @@ class AuditLog(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     details = Column(JSON)
     user = relationship("User")
+
 
 class ControllerJob(Base):
     __tablename__ = 'controller_jobs'
@@ -65,31 +63,31 @@ class ControllerJob(Base):
     ai_suggestions = relationship("ControllerAISuggestion", back_populates="job")
     set_files = relationship("SetFile", back_populates="job")
     sizing_results = relationship("PositionSizingResult", back_populates="job")
-    trade_records = relationship("TradeRecord", back_populates="job")
+    # Removed trade_records relationship (no job_id in trade_records table)
 
 
 class ControllerTask(Base):
     __tablename__ = 'controller_tasks'
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(Integer, ForeignKey('controller_jobs.id'))
-    parent_task_id = Column(Integer, ForeignKey('controller_tasks.id'), nullable=True)  # NEW: fine-tune/retry lineage
+    parent_task_id = Column(Integer, ForeignKey('controller_tasks.id'), nullable=True)
     step_number = Column(Integer)
     step_name = Column(String(255))
     status = Column(String(32))
-    status_reason = Column(Text, nullable=True)              # NEW: Reason for current status
-    priority = Column(Float, default=0)                      # NEW: Task priority (for queueing)
-    best_so_far = Column(Integer, default=0)                 # NEW: Boolean flag (0/1) for best-so-far
+    status_reason = Column(Text, nullable=True)
+    priority = Column(Float, default=0)
+    best_so_far = Column(Integer, default=0)
     assigned_worker = Column(String(255))
     file_path = Column(Text)
-    file_blob = Column(BLOB, nullable=True)  # For MySQL, use BLOB
+    file_blob = Column(BLOB, nullable=True)
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_heartbeat = Column(DateTime, nullable=True)
     attempt_count = Column(Integer)
     max_attempts = Column(Integer)
-    fine_tune_depth = Column(Integer, default=0)             # NEW: Fine-tune chain depth (for stopping)
-    last_error = Column(Text, nullable=True)                 # NEW: Last error message if any
+    fine_tune_depth = Column(Integer, default=0)
+    last_error = Column(Text, nullable=True)
     worker_job_id = Column(Integer)
 
     job = relationship("ControllerJob", back_populates="tasks")
@@ -98,8 +96,8 @@ class ControllerTask(Base):
     artifacts = relationship("ControllerArtifact", back_populates="task")
     logs = relationship("ControllerTaskLog", back_populates="task")
     test_metrics = relationship("TestMetric", back_populates="task")
-    trade_records = relationship("TradeRecord", back_populates="task")
-    parent_task = relationship("ControllerTask", remote_side=[id])  # Self-referential for lineage
+    # Removed trade_records relationship (no controller_task_id in trade_records table)
+    parent_task = relationship("ControllerTask", remote_side=[id])
 
 
 class ControllerAttempt(Base):
@@ -267,25 +265,26 @@ class SetFile(Base):
 class Portfolio(Base):
     __tablename__ = 'portfolios'
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     portfolio_name = Column(String(255))
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     meta_json = Column(Text)
 
+    user = relationship("User", back_populates="portfolios")
     sizing_results = relationship("PositionSizingResult", back_populates="portfolio")
-    trade_records = relationship("TradeRecord", back_populates="portfolio")
     portfolio_sets = relationship("PortfolioSet", back_populates="portfolio", cascade="all, delete-orphan")
-    # ^^^ ONLY here!
+    # Removed trade_records relationship (no portfolio_id in trade_records table)
+
 
 class PortfolioSet(Base):
-    __tablename__ = 'Portfolio_Sets'
+    __tablename__ = 'portfolio_sets'
     id = Column(Integer, primary_key=True, autoincrement=True)
     portfolio_id = Column(Integer, ForeignKey('portfolios.id'), nullable=False)
     test_metrics_id = Column(Integer, ForeignKey('test_metrics.id'), nullable=False)
 
-    portfolio = relationship("Portfolio", back_populates="portfolio_sets")  # <-- singular
+    portfolio = relationship("Portfolio", back_populates="portfolio_sets")
     test_metric = relationship("TestMetric")
-    # DO NOT declare portfolio_sets here!
 
 
 class PositionSizingResult(Base):
@@ -305,10 +304,8 @@ class PositionSizingResult(Base):
 
 class TradeRecord(Base):
     __tablename__ = 'trade_records'
+
     id = Column(Integer, primary_key=True, autoincrement=True)
-    controller_task_id = Column(Integer, ForeignKey('controller_tasks.id'))
-    job_id = Column(Integer, ForeignKey('controller_jobs.id'))
-    portfolio_id = Column(Integer, ForeignKey('portfolios.id'))
     order_id = Column(Integer)
     parent_order_id = Column(Integer)
     symbol = Column(String(255))
@@ -331,7 +328,7 @@ class TradeRecord(Base):
     magic_number = Column(Integer)
     comment = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+    test_metrics_id = Column(Integer, ForeignKey('test_metrics.id'))
 
-    task = relationship("ControllerTask", back_populates="trade_records")
-    job = relationship("ControllerJob", back_populates="trade_records")
-    portfolio = relationship("Portfolio", back_populates="trade_records")
+    # Only valid relationship per your DB structure
+    test_metric = relationship("TestMetric", backref="trade_records")

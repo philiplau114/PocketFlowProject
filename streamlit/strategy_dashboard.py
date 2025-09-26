@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_utils import get_db, store_set_file_summary
 import config
 import redis
-from session_manager import is_authenticated, sync_streamlit_session
+from user_management.session_manager import is_authenticated, sync_streamlit_session
 
 # --- CONFIG ---
 if hasattr(config, "SQLALCHEMY_DATABASE_URL") and config.SQLALCHEMY_DATABASE_URL:
@@ -28,33 +28,65 @@ if not is_authenticated(st.session_state):
     st.stop()
 sync_streamlit_session(st.session_state, st.session_state["username"])
 
+# --- User Input for :user_rank ---
+st.sidebar.header("Strategy Table Filter")
+user_rank = st.sidebar.number_input(
+    "Show strategies with rank (rn):",
+    min_value=1,
+    value=1,
+    step=1,
+    help="Select which ranked strategies to display (default: 1 = best per symbol)"
+)
+
 # --- Load Data ---
 @st.cache_data(ttl=60)
-def load_metrics():
+def load_metrics(user_rank):
+    query = """
+    SELECT
+      metric_id,
+      set_file_name,
+      symbol,
+      net_profit,
+      max_drawdown,
+      total_trades,
+      recovery_factor,
+      weighted_score,
+      normalized_total_distance_to_good,
+      win_rate,
+      profit_factor,
+      expected_payoff,
+      status,
+      criteria_reason,
+      created_at
+    FROM (
+      SELECT
+        id AS metric_id,
+        set_file_name,
+        symbol,
+        net_profit,
+        max_drawdown,
+        total_trades,
+        recovery_factor,
+        weighted_score,
+        normalized_total_distance_to_good,
+        win_rate,
+        profit_factor,
+        expected_payoff,
+        criteria_passed AS status,
+        criteria_reason,
+        created_at,
+        ROW_NUMBER() OVER (
+          PARTITION BY v_test_metrics_scored.symbol
+          ORDER BY v_test_metrics_scored.normalized_total_distance_to_good,
+                   v_test_metrics_scored.weighted_score DESC
+        ) AS rn
+      FROM v_test_metrics_scored
+    ) AS rank_metrics
+    WHERE rn <= %s
+    ORDER BY normalized_total_distance_to_good, weighted_score DESC
+    """
     with engine.connect() as conn:
-        df = pd.read_sql(
-            """
-            SELECT 
-                id as metric_id,
-                set_file_name,
-                symbol,
-                net_profit,
-                max_drawdown,
-                total_trades,
-                recovery_factor,
-                weighted_score,
-                normalized_total_distance_to_good,
-                win_rate,
-                profit_factor,
-                expected_payoff,
-                criteria_passed as status,
-                criteria_reason,
-                created_at
-            FROM v_test_metrics_scored
-            ORDER BY net_profit DESC
-            """,
-            conn
-        )
+        df = pd.read_sql(query, conn, params=(user_rank,))
     return df
 
 @st.cache_data(ttl=60)
@@ -115,7 +147,6 @@ def call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key):
 # --- UI Layout ---
 st.set_page_config(page_title="Strategy Dashboard", layout="wide")
 
-# Custom CSS: make main content always full width
 st.markdown(
     """
     <style>
@@ -128,7 +159,7 @@ st.markdown(
 )
 st.title("📈 Strategy Dashboard")
 
-metrics_df = load_metrics()
+metrics_df = load_metrics(user_rank)
 search = st.text_input("Search strategies...", "")
 
 if search:
@@ -145,7 +176,31 @@ display_cols = [
     "expected_payoff", "normalized_total_distance_to_good", "status"
 ]
 display_df = filtered[display_cols]
-display_df = display_df.rename(columns={
+
+st.write(f"Number of strategies found: {len(display_df)} for rank {user_rank}")
+
+max_page_size = min(50, len(display_df))
+default_page_size = min(3, max_page_size if max_page_size > 0 else 1)
+records_per_page_key = f"records_per_page_{len(display_df)}_{user_rank}"
+
+page_size = st.number_input(
+    "Records per page",
+    min_value=1,
+    max_value=max_page_size if max_page_size > 0 else 1,
+    value=st.session_state.get("page_size", default_page_size),
+    step=1,
+    key=records_per_page_key
+)
+st.session_state["page_size"] = page_size
+
+num_pages = max((len(display_df) - 1) // page_size + 1, 1)
+page_num = st.number_input("Page", min_value=1, max_value=num_pages, value=1, step=1)
+start_idx = (page_num - 1) * page_size
+end_idx = start_idx + page_size
+paged_df = display_df.iloc[start_idx:end_idx].reset_index(drop=True)
+
+# --- Rename columns for UI/table display ---
+paged_df_ui = paged_df.rename(columns={
     "set_file_name": "Strategy",
     "symbol": "Symbol",
     "net_profit": "Net Profit",
@@ -160,26 +215,15 @@ display_df = display_df.rename(columns={
     "status": "Status",
 })
 
-# ---- User-defined records per page ----
-st.subheader("Strategies")
-max_page_size = min(50, len(display_df))
-page_size = st.number_input("Records per page", min_value=1, max_value=max_page_size if max_page_size > 0 else 1, value=3, step=1)
-
-num_pages = max((len(display_df) - 1) // page_size + 1, 1)
-page_num = st.number_input("Page", min_value=1, max_value=num_pages, value=1, step=1)
-start_idx = (page_num - 1) * page_size
-end_idx = start_idx + page_size
-paged_df = display_df.iloc[start_idx:end_idx].reset_index(drop=True)
-
 # --- Dynamic column width for Strategy (st.data_editor only) ---
-if not paged_df.empty:
-    max_strategy_len = paged_df["Strategy"].map(len).max()
+if not paged_df_ui.empty:
+    max_strategy_len = paged_df_ui["Strategy"].map(len).max()
 else:
     max_strategy_len = 20
-strategy_col_width = min(max(200, max_strategy_len * 9), 600)  # Estimate width
+strategy_col_width = min(max(200, max_strategy_len * 9), 600)
 
 st.data_editor(
-    paged_df,
+    paged_df_ui,
     width="stretch",
     hide_index=True,
     column_config={"Strategy": st.column_config.Column(width=strategy_col_width)},
@@ -187,17 +231,17 @@ st.data_editor(
     key="strategy_table_view"
 )
 
-strategy_names = paged_df["Strategy"].tolist()
+strategy_names = paged_df_ui["Strategy"].tolist()
 selected_name = st.selectbox("Select strategy for details", strategy_names)
 selected_idx = None
 if selected_name:
-    sel_row = paged_df[paged_df["Strategy"] == selected_name].index[0]
+    sel_row = paged_df_ui[paged_df_ui["Strategy"] == selected_name].index[0]
     selected_idx = start_idx + sel_row
 
 if selected_idx is not None and 0 <= selected_idx < len(filtered):
     strategy = filtered.iloc[selected_idx]
     st.markdown(f"## {strategy['set_file_name']}")
-    st.caption(f"{strategy['symbol']} | Strategy ID: {strategy['metric_id']} | Created: {strategy['created_at'].strftime('%Y-%m-%d %H:%M')}")
+    st.caption(f"{strategy['symbol']} | Strategy ID: {strategy['metric_id']} | Created: {strategy['created_at']}")
     with st.container():
         kpi1, kpi2, kpi3 = st.columns(3)
         kpi1.metric("Net Profit", f"${strategy['net_profit']:.2f}")
@@ -206,7 +250,7 @@ if selected_idx is not None and 0 <= selected_idx < len(filtered):
 
         kpi4, kpi5, kpi6 = st.columns(3)
         kpi4.metric("Recovery Factor", f"{strategy['recovery_factor']:.2f}")
-        kpi5.metric("Weighted Score", f"{strategy['weighted_score']:.2f}")
+        kpi5.metric("Score", f"{strategy['weighted_score']:.2f}")
         kpi6.metric("Distance", f"{strategy['normalized_total_distance_to_good']:.2f}")
 
         kpi7, kpi8, kpi9 = st.columns(3)

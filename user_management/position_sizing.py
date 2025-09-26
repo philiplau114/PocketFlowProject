@@ -1,6 +1,4 @@
 import numpy as np
-import pandas as pd
-from scipy.stats import norm
 
 def kelly_fraction(win_rate, avg_win, avg_loss):
     b = avg_win / abs(avg_loss)

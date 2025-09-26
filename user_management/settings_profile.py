@@ -6,7 +6,23 @@ from session_manager import is_authenticated, sync_streamlit_session
 
 r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
 
+# --- UI Enhancement: Full-width layout and custom CSS --- 
 st.set_page_config(page_title="Settings / Profile", layout="centered")
+st.markdown(
+    """
+    <style>
+    .block-container { max-width: 100% !important; padding: 2rem 2rem 2rem 2rem; }
+    .element-container { width: 100% !important; }
+    .stDataFrame, .stSelectbox, .stDataEditor, .stTextInput, .stForm { width: 100% !important; }
+    .stButton button { width: 100%; }
+    .stTextInput input { width: 100%; }
+    .stTextArea textarea { width: 100%; }
+    .stForm { box-shadow: 0 2px 12px rgba(0,0,0,0.06); border-radius: 0.5rem; padding: 2rem; background: #fafbfc; }
+    .stForm .stButton { margin-top: 1em; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 st.title("⚙️ Settings & Profile")
 
 if not is_authenticated(st.session_state):
