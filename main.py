@@ -1,6 +1,8 @@
 import streamlit as st
 import importlib.util
 import os
+import config
+from user_management.session_manager import is_authenticated, sync_streamlit_session, delete_session
 
 def import_module_from_file(module_name, file_path):
     spec = importlib.util.spec_from_file_location(module_name, file_path)
@@ -8,9 +10,9 @@ def import_module_from_file(module_name, file_path):
     spec.loader.exec_module(module)
     return module
 
-# --- Session & Role Helpers ---
+# --- Session & Role Helpers (Unified) ---
 def get_logged_in_user():
-    return st.session_state.get("session_token", None)
+    return st.session_state.get("username", None)
 
 def get_current_user_role():
     # Should be 'Admin', 'Standard', or 'Guest'
@@ -20,18 +22,21 @@ def is_admin():
     return get_current_user_role() == "Admin"
 
 def is_logged_in():
-    return get_logged_in_user() is not None
+    # Use unified session management
+    return is_authenticated(st.session_state)
 
 def is_standard_user():
     return get_current_user_role() == "Standard" or get_current_user_role() == "Trader"
 
 # --- Page Choices ---
-st.set_page_config(page_title="PocketFlow Main", layout="centered")
-st.title("PocketFlow Project")
-st.markdown("Welcome to PocketFlow! Select a page from the navigation below:")
+st.set_page_config(page_title="Portfolio Lab Main", layout="centered")
+st.title("Portfolio Lab")
+st.markdown("Intelligent automation for algorithmic portfolios.")
 
-# Sidebar and logout enhancement
+# Sync Streamlit session with Redis if logged in
 if is_logged_in():
+    sync_streamlit_session(st.session_state, st.session_state.get("username"))
+
     with st.sidebar:
         options = [
             "Strategy Dashboard",
@@ -47,9 +52,9 @@ if is_logged_in():
         logout_btn = st.button("Logout", key="sidebar_logout")
         if logout_btn:
             # Remove session state keys and force rerun to return to login
-            st.session_state.pop("session_token", None)
-            st.session_state.pop("username", None)
-            st.session_state.pop("user_role", None)
+            delete_session(st.session_state.get("username"))
+            for key in ["username", "user_role", "open_router_api_key"]:
+                st.session_state.pop(key, None)
             st.success("Logged out successfully!")
             st.rerun()
 else:
@@ -108,6 +113,6 @@ elif page == "Admin Approval / Audit Log":
 
 st.markdown("""
 <div style='text-align: center; color: #999; margin-top:2em'>
-  &copy; 2025 PocketFlowProject. Powered by Streamlit.
+  &copy; 2025 Portfolio Lab. Powered by Streamlit.
 </div>
 """, unsafe_allow_html=True)

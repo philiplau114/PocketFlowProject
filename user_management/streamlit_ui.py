@@ -7,14 +7,14 @@ from db_utils import get_db, create_user, fetch_user_by_username
 from user_management.auth import login, logout, get_active_sessions
 from user_management.admin import approve_user, deny_user, change_role
 from user_management.audit import get_audit_log_for_user
-
+from session_manager import create_session, delete_session, is_authenticated, sync_streamlit_session
 
 def registration_page():
     st.title("User Registration")
     username = st.text_input("Username")
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
-    open_router_api_key = st.text_input("OpenRouter API Key", type="password")  # <-- Add this field!
+    open_router_api_key = st.text_input("OpenRouter API Key", type="password")
 
     if st.button("Register"):
         session = get_db()
@@ -27,7 +27,7 @@ def registration_page():
                 username,
                 email,
                 password_hash,
-                open_router_api_key=open_router_api_key  # <-- Pass this argument!
+                open_router_api_key=open_router_api_key
             )
             st.success("Registration complete! Awaiting admin approval.")
 
@@ -36,17 +36,27 @@ def login_page():
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     if st.button("Login"):
-        session = get_db()  # Get the database session
-        session_token, error = login(session, username, password)  # Pass session as first argument
+        session = get_db()
+        session_token, error = login(session, username, password)
         if session_token:
+            # Use unified session management
+            user = fetch_user_by_username(session, username)
+            session_data = {
+                "username": user.username,
+                "user_role": user.role,
+                "open_router_api_key": user.open_router_api_key,
+                "status": user.status
+            }
+            create_session(user.username, session_data)
+            for k, v in session_data.items():
+                st.session_state[k] = v
             st.success("Login successful!")
-            st.session_state['session_token'] = session_token
+            st.rerun()
         else:
             st.error(error)
 
 def admin_approval_page(admin_id):
     st.title("Admin User Approval")
-    # Example code: fetch pending users and show approval buttons
     session = get_db()
     pending_users = session.query(User).filter_by(status='Pending').all()
     for user in pending_users:
@@ -65,9 +75,6 @@ def audit_log_page():
     for log in logs:
         st.write(log)
 
-# In your Streamlit main app, import and call these functions as pages.
-# Add this at the bottom of streamlit_ui.py
-
 def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", [
@@ -81,7 +88,6 @@ def main():
     elif page == "Login":
         login_page()
     elif page == "Admin Approval":
-        # You need to pass admin_id, e.g., from st.session_state or a test value
         admin_id = st.session_state.get("admin_id", "admin_test")
         admin_approval_page(admin_id)
     elif page == "Audit Log":

@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 import sqlalchemy
-import redis
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+import redis
 from datetime import datetime, timedelta
+from session_manager import is_authenticated, sync_streamlit_session
 
 # --- CONFIGURATION ---
 if config.SQLALCHEMY_DATABASE_URL:
@@ -16,17 +17,30 @@ else:
         f"mysql+pymysql://{config.MYSQL_USER}:{config.MYSQL_PASSWORD}"
         f"@{config.MYSQL_HOST}:{config.MYSQL_PORT}/{config.MYSQL_DATABASE}"
     )
-REDIS_HOST = config.REDIS_HOST
-REDIS_PORT = config.REDIS_PORT
-REDIS_QUEUE = config.REDIS_QUEUE
 
-# --- DB & REDIS CONNECTIONS ---
 engine = sqlalchemy.create_engine(DB_URL)
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
+REDIS_QUEUE = config.REDIS_QUEUE
 
 # --- STREAMLIT APP ---
 st.set_page_config(page_title="Controller/Worker Monitoring Dashboard", layout="wide")
+st.markdown(
+    """
+    <style>
+    .block-container { max-width: 100% !important; padding: 2rem 2rem 2rem 2rem; }
+    .element-container { width: 100% !important; }
+    .stDataFrame, .stSelectbox, .stDataEditor { width: 100% !important; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 st.title("⚡ Controller/Worker Monitoring Dashboard")
+
+# --- Session Check (reuse session per user) ---
+if not is_authenticated(st.session_state):
+    st.warning("You must be logged in as an Admin to view this page.")
+    st.stop()
+sync_streamlit_session(st.session_state, st.session_state["username"])
 
 # --- THRESHOLDS MANAGEMENT ---
 st.header("Threshold Management")
@@ -96,7 +110,7 @@ with engine.connect() as conn:
         conn,
     )
 if not df_aging.empty:
-    st.dataframe(df_aging)
+    st.data_editor(df_aging, width="stretch", hide_index=True, disabled=True)
     starved = df_aging[df_aging['wait_mins'] > 60]
     if not starved.empty:
         st.warning(f"⚠️ {len(starved)} tasks have been waiting over 60 minutes!")
@@ -116,7 +130,7 @@ with engine.connect() as conn:
         conn,
     )
 if not df_chain.empty:
-    st.dataframe(df_chain)
+    st.data_editor(df_chain, width="stretch", hide_index=True, disabled=True)
 else:
     st.info("No fine-tune or retry chains found.")
 
@@ -159,7 +173,7 @@ with engine.connect() as conn:
         conn,
     )
 if not df_recent.empty:
-    st.dataframe(df_recent)
+    st.data_editor(df_recent, width="stretch", hide_index=True, disabled=True)
 else:
     st.info("No recent task activity found.")
 

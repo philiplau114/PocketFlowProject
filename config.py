@@ -107,3 +107,7 @@ RELOAD_INTERVAL = int(os.getenv('RELOAD_INTERVAL', 60))  # default to 60 seconds
 
 LOCK_RETRY_COUNT = int(os.getenv('LOCK_RETRY_COUNT', 5))
 LOCK_RETRY_SLEEP = float(os.getenv('LOCK_RETRY_SLEEP', 1))
+
+# --- Redis Session ---
+SESSION_PREFIX = os.getenv('SESSION_PREFIX', 'session:')
+SESSION_TTL = int(os.getenv('SESSION_TTL', 3600))  # Default: 1 hour

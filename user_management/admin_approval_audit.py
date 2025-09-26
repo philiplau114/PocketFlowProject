@@ -2,6 +2,8 @@ import streamlit as st
 import sys
 import os
 from datetime import datetime
+import config
+from session_manager import is_authenticated, sync_streamlit_session
 
 # Ensure root and db folder are in Python path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -13,16 +15,15 @@ st.markdown("<h1 style='text-align: center;'>Admin Approval & Audit Log</h1>", u
 
 # -- Helper: Check if current user is admin --
 def is_admin(session_state):
-    session_token = session_state.get("session_token")
-    if not session_token:
+    username = session_state.get("username")
+    if not username:
         return False, None
     db_session = get_db()
-    username = session_state.get("username")
     user = fetch_user_by_username(db_session, username)
     return user and user.role == "Admin", user
 
-# -- Admin Login Section (simple for demo) --
-if "session_token" not in st.session_state or "username" not in st.session_state:
+# Unified session check
+if not is_authenticated(st.session_state):
     with st.form("admin_login_form"):
         username = st.text_input("Admin Username")
         password = st.text_input("Password", type="password")
@@ -31,13 +32,22 @@ if "session_token" not in st.session_state or "username" not in st.session_state
         db_session = get_db()
         user = fetch_user_by_username(db_session, username)
         if user and user.role == "Admin" and user.verify_password(password) and user.status == "Approved":
-            st.session_state["session_token"] = f"admin-{user.id}"  # For demo; use your session logic here
-            st.session_state["username"] = username
+            # Set unified session
+            from session_manager import create_session
+            session_data = {
+                "username": username,
+                "user_role": "Admin"
+            }
+            create_session(username, session_data)
+            for k, v in session_data.items():
+                st.session_state[k] = v
             st.success("Logged in as Admin.")
             st.rerun()
         else:
             st.error("Invalid admin credentials or not approved.")
     st.stop()
+else:
+    sync_streamlit_session(st.session_state, st.session_state.get("username"))
 
 is_admin_user, admin_user = is_admin(st.session_state)
 if not is_admin_user:
@@ -85,7 +95,7 @@ if audit_logs:
             "Target": log.target_id,
             "Details": str(log.details)
         })
-    st.dataframe(log_table)
+    st.data_editor(log_table, width="stretch", hide_index=True, disabled=True)
 else:
     st.info("No audit log entries found.")
 

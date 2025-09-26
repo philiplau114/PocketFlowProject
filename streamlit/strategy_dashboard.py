@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_utils import get_db, store_set_file_summary
 import config
 import redis
+from session_manager import is_authenticated, sync_streamlit_session
 
 # --- CONFIG ---
 if hasattr(config, "SQLALCHEMY_DATABASE_URL") and config.SQLALCHEMY_DATABASE_URL:
@@ -17,12 +18,15 @@ else:
         f"mysql+pymysql://{config.MYSQL_USER}:{config.MYSQL_PASSWORD}"
         f"@{config.MYSQL_HOST}:{config.MYSQL_PORT}/{config.MYSQL_DATABASE}"
     )
-REDIS_HOST = config.REDIS_HOST
-REDIS_PORT = config.REDIS_PORT
-REDIS_QUEUE = config.REDIS_QUEUE
 
 engine = sqlalchemy.create_engine(DB_URL)
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
+
+# --- Session Check ---
+if not is_authenticated(st.session_state):
+    st.warning("You must be logged in to view this page.")
+    st.stop()
+sync_streamlit_session(st.session_state, st.session_state["username"])
 
 # --- Load Data ---
 @st.cache_data(ttl=60)
@@ -69,11 +73,9 @@ def load_artifacts_for_task(link_id):
     return df
 
 def get_open_router_api_key():
-    # Try to get user's open_router_api_key from session or Redis
     key = st.session_state.get("open_router_api_key")
     if key:
         return key
-    # If not in session, try to get from Redis using username
     username = st.session_state.get("username")
     if username:
         val = r.get(f"user:{username}:open_router_api_key")
@@ -82,15 +84,12 @@ def get_open_router_api_key():
     return None
 
 def call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key):
-    # Compose the prompt markdown using the template in explain_set.md
-    # For simplicity, assume explain_set.md is in the same directory
     with open(os.path.join(os.path.dirname(__file__), "explain_set.md"), "r") as f:
         prompt_template = f.read()
     set_file_str = set_file_blob.decode() if isinstance(set_file_blob, bytes) else set_file_blob
     summary_csv_str = summary_metrics_blob.decode() if isinstance(summary_metrics_blob, bytes) else summary_metrics_blob
     prompt = prompt_template.replace("Here is the .set file:", f"Here is the .set file:\n\n{set_file_str}\n\n")
     prompt = prompt.replace("And here is the backtest summary (.csv):", f"And here is the backtest summary (.csv):\n\n{summary_csv_str}\n\n")
-    # Call OpenRouter API
     import requests
     headers = {
         "Authorization": f"Bearer {user_api_key}",
@@ -105,7 +104,6 @@ def call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key):
     response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
     if response.status_code == 200:
         result = response.json()
-        # Extract AI response (assume OpenRouter compatible with OpenAI schema)
         try:
             ai_content = result["choices"][0]["message"]["content"]
         except Exception:
@@ -116,17 +114,20 @@ def call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key):
 
 # --- UI Layout ---
 st.set_page_config(page_title="Strategy Dashboard", layout="wide")
+
+# Custom CSS: make main content always full width
 st.markdown(
     """
     <style>
-    .big-font {font-size:20px !important;}
-    .strategy-table thead tr th {font-size:16px;}
+    .block-container { max-width: 100% !important; padding: 2rem 2rem 2rem 2rem; }
+    .element-container { width: 100% !important; }
+    .stDataFrame, .stSelectbox, .stDataEditor { width: 100% !important; }
     </style>
-    """, unsafe_allow_html=True
+    """,
+    unsafe_allow_html=True
 )
 st.title("📈 Strategy Dashboard")
 
-# --- Strategy Search and Table ---
 metrics_df = load_metrics()
 search = st.text_input("Search strategies...", "")
 
@@ -159,171 +160,156 @@ display_df = display_df.rename(columns={
     "status": "Status",
 })
 
-# Conditional coloring and formatting
-def color_net_profit(val):
-    return "color: green;" if val > 0 else "color: red;"
+# ---- User-defined records per page ----
+st.subheader("Strategies")
+max_page_size = min(50, len(display_df))
+page_size = st.number_input("Records per page", min_value=1, max_value=max_page_size if max_page_size > 0 else 1, value=3, step=1)
 
-def color_max_dd(val):
-    return "color: red;" if val > 15 else "color: orange;" if val > 10 else "color: green;"
+num_pages = max((len(display_df) - 1) // page_size + 1, 1)
+page_num = st.number_input("Page", min_value=1, max_value=num_pages, value=1, step=1)
+start_idx = (page_num - 1) * page_size
+end_idx = start_idx + page_size
+paged_df = display_df.iloc[start_idx:end_idx].reset_index(drop=True)
 
-def color_score(val):
-    return "color: green;" if val > 0.7 else "color: orange;" if val > 0.5 else "color: red;"
+# --- Dynamic column width for Strategy (st.data_editor only) ---
+if not paged_df.empty:
+    max_strategy_len = paged_df["Strategy"].map(len).max()
+else:
+    max_strategy_len = 20
+strategy_col_width = min(max(200, max_strategy_len * 9), 600)  # Estimate width
 
-def color_win_rate(val):
-    return "color: green;" if val > 60 else "color: orange;" if val > 50 else "color: red;"
+st.data_editor(
+    paged_df,
+    width="stretch",
+    hide_index=True,
+    column_config={"Strategy": st.column_config.Column(width=strategy_col_width)},
+    disabled=True,
+    key="strategy_table_view"
+)
 
-def color_distance(val):
-    return "color: green;" if val < 0.5 else "color: orange;" if val < 1.0 else "color: red;"
+strategy_names = paged_df["Strategy"].tolist()
+selected_name = st.selectbox("Select strategy for details", strategy_names)
+selected_idx = None
+if selected_name:
+    sel_row = paged_df[paged_df["Strategy"] == selected_name].index[0]
+    selected_idx = start_idx + sel_row
 
-styled_df = display_df.style.\
-    map(color_net_profit, subset=["Net Profit"]).\
-    map(color_max_dd, subset=["Max DD"]).\
-    map(color_score, subset=["Score"]).\
-    map(color_win_rate, subset=["Win Rate"]).\
-    map(color_distance, subset=["Distance"])
+if selected_idx is not None and 0 <= selected_idx < len(filtered):
+    strategy = filtered.iloc[selected_idx]
+    st.markdown(f"## {strategy['set_file_name']}")
+    st.caption(f"{strategy['symbol']} | Strategy ID: {strategy['metric_id']} | Created: {strategy['created_at'].strftime('%Y-%m-%d %H:%M')}")
+    with st.container():
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("Net Profit", f"${strategy['net_profit']:.2f}")
+        kpi2.metric("Max Drawdown", f"{strategy['max_drawdown']:.2f}")
+        kpi3.metric("Total Trades", int(strategy['total_trades']))
 
-col1, col2 = st.columns([2, 3])
+        kpi4, kpi5, kpi6 = st.columns(3)
+        kpi4.metric("Recovery Factor", f"{strategy['recovery_factor']:.2f}")
+        kpi5.metric("Weighted Score", f"{strategy['weighted_score']:.2f}")
+        kpi6.metric("Distance", f"{strategy['normalized_total_distance_to_good']:.2f}")
 
-with col1:
-    st.subheader("Strategies")
-    st.dataframe(styled_df, width='stretch', hide_index=True)
-    if len(filtered) > 0:
-        selected_idx = st.number_input(
-            "Select strategy rank for detail", min_value=1, max_value=len(filtered), value=1, step=1
-        ) - 1
-    else:
-        selected_idx = None
+        kpi7, kpi8, kpi9 = st.columns(3)
+        kpi7.metric("Win Rate", f"{strategy['win_rate']:.2f}%")
+        kpi8.metric("Profit Factor", f"{strategy['profit_factor']:.2f}")
+        kpi9.metric("Expected Payoff", f"{strategy['expected_payoff']:.2f}")
 
-with col2:
-    if selected_idx is not None and len(filtered) > 0:
-        strategy = filtered.iloc[selected_idx]
-        st.subheader(f"{strategy['set_file_name']}")
+    st.markdown(f"**Criteria Status:** {'✅' if strategy['status'] else '❌'} {strategy['criteria_reason']}")
 
-        st.caption(
-            f"{strategy['symbol']} | Strategy ID: {strategy['metric_id']} | Created: {strategy['created_at'].strftime('%Y-%m-%d %H:%M')}"
-        )
-        with st.container():
-            # KPI Cards
-            kpi1, kpi2, kpi3 = st.columns(3)
-            kpi1.metric("Net Profit", f"${strategy['net_profit']:.2f}")
-            kpi2.metric("Max Drawdown", f"{strategy['max_drawdown']:.2f}")
-            kpi3.metric("Total Trades", int(strategy['total_trades']))
+    artifacts = load_artifacts_for_task(int(strategy["metric_id"]))
 
-            kpi4, kpi5, kpi6 = st.columns(3)
-            kpi4.metric("Recovery Factor", f"{strategy['recovery_factor']:.2f}")
-            kpi5.metric("Weighted Score", f"{strategy['weighted_score']:.2f}")
-            kpi6.metric("Distance", f"{strategy['normalized_total_distance_to_good']:.2f}")
-
-            kpi7, kpi8, kpi9 = st.columns(3)
-            kpi7.metric("Win Rate", f"{strategy['win_rate']:.2f}%")
-            kpi8.metric("Profit Factor", f"{strategy['profit_factor']:.2f}")
-            kpi9.metric("Expected Payoff", f"{strategy['expected_payoff']:.2f}")
-
-        # Criteria reason
-        st.markdown(f"**Criteria Status:** {'✅' if strategy['status'] else '❌'} {strategy['criteria_reason']}")
-
-        # --- Artifact Download and Graph ---
-        artifacts = load_artifacts_for_task(int(strategy["metric_id"]))
-
-        # Flexible set file pick
-        set_file_types_priority = [
-            "output_set", "Best Pass set_file", "set_file", "ai_set", "input_set"
-        ]
-        set_file_row = pd.DataFrame()
-        for typ in set_file_types_priority:
-            set_file_row = artifacts[artifacts["artifact_type"] == typ]
-            if not set_file_row.empty:
-                break
-
+    set_file_types_priority = [
+        "output_set", "Best Pass set_file", "set_file", "ai_set", "input_set"
+    ]
+    set_file_row = pd.DataFrame()
+    for typ in set_file_types_priority:
+        set_file_row = artifacts[artifacts["artifact_type"] == typ]
         if not set_file_row.empty:
-            set_file = set_file_row.iloc[0]
-            if set_file["file_blob"] is not None:
-                st.download_button(
-                    label=f"Download {set_file['file_name']}",
-                    data=set_file["file_blob"],
-                    file_name=set_file["file_name"],
-                    mime="application/octet-stream"
-                )
-            else:
-                st.info("No .set file available for download (file is empty).")
+            break
+
+    if not set_file_row.empty:
+        set_file = set_file_row.iloc[0]
+        if set_file["file_blob"] is not None:
+            st.download_button(
+                label=f"Download {set_file['file_name']}",
+                data=set_file["file_blob"],
+                file_name=set_file["file_name"],
+                mime="application/octet-stream"
+            )
         else:
-            st.info("No .set file available for download.")
+            st.info("No .set file available for download (file is empty).")
+    else:
+        st.info("No .set file available for download.")
 
-        # Flexible gif pick
-        gif_types_priority = [
-            "output_gif", "optimization_report_gif", "input_gif"
-        ]
-        gif_row = pd.DataFrame()
-        for typ in gif_types_priority:
-            gif_row = artifacts[artifacts["artifact_type"] == typ]
-            if not gif_row.empty:
-                break
-
+    gif_types_priority = [
+        "output_gif", "optimization_report_gif", "input_gif"
+    ]
+    gif_row = pd.DataFrame()
+    for typ in gif_types_priority:
+        gif_row = artifacts[artifacts["artifact_type"] == typ]
         if not gif_row.empty:
-            gif = gif_row.iloc[0]
-            if gif["file_blob"] is not None:
-                st.image(BytesIO(gif["file_blob"]), caption=gif["file_name"], width='stretch')
-            else:
-                st.info("No equity curve available (file is empty).")
-        else:
-            st.info("No equity curve available.")
+            break
 
-        # --- Set File Summary / AI Set Summary Button Logic ---
-        set_file_summary_row = artifacts[artifacts["artifact_type"] == "set_file_summary"]
-        # Determine if summary is already generated or just generated this session
-        summary_shown_key = f"ai_summary_shown_{strategy['metric_id']}"
-        summary_md = None
-        if not set_file_summary_row.empty:
-            summary_md = set_file_summary_row.iloc[0]["file_blob"]
-            if isinstance(summary_md, bytes):
-                summary_md = summary_md.decode()
-            # Mark as shown in session state to disable button
-            st.session_state[summary_shown_key] = True
+    if not gif_row.empty:
+        gif = gif_row.iloc[0]
+        if gif["file_blob"] is not None:
+            st.image(BytesIO(gif["file_blob"]), caption=gif["file_name"], width="stretch")
+        else:
+            st.info("No equity curve available (file is empty).")
+    else:
+        st.info("No equity curve available.")
+
+    set_file_summary_row = artifacts[artifacts["artifact_type"] == "set_file_summary"]
+    summary_shown_key = f"ai_summary_shown_{strategy['metric_id']}"
+    summary_md = None
+    if not set_file_summary_row.empty:
+        summary_md = set_file_summary_row.iloc[0]["file_blob"]
+        if isinstance(summary_md, bytes):
+            summary_md = summary_md.decode()
+        st.session_state[summary_shown_key] = True
+        st.markdown("### AI Set File Summary")
+        st.markdown(summary_md, unsafe_allow_html=True)
+    else:
+        if st.session_state.get(summary_shown_key, False) and st.session_state.get(f"last_ai_summary_{strategy['metric_id']}", None):
+            summary_md = st.session_state[f"last_ai_summary_{strategy['metric_id']}"]
             st.markdown("### AI Set File Summary")
             st.markdown(summary_md, unsafe_allow_html=True)
-        else:
-            # If just generated this session, get it from session and show
-            if st.session_state.get(summary_shown_key, False) and st.session_state.get(f"last_ai_summary_{strategy['metric_id']}", None):
-                summary_md = st.session_state[f"last_ai_summary_{strategy['metric_id']}"]
-                st.markdown("### AI Set File Summary")
-                st.markdown(summary_md, unsafe_allow_html=True)
 
-        # Button logic (disable if summary shown)
-        user_api_key = get_open_router_api_key()
-        output_set_row = artifacts[artifacts["artifact_type"] == "output_set"]
-        summary_metrics_csv_row = artifacts[artifacts["artifact_type"] == "summary_metrics_csv"]
-        enable_button = user_api_key and not output_set_row.empty and not summary_metrics_csv_row.empty
-        disable_btn = st.session_state.get(summary_shown_key, False)
-        btn = st.button(
-            "Generate AI Set Summary",
-            disabled=not enable_button or disable_btn,
-            key=f"gen_ai_summary_btn_{strategy['metric_id']}"
-        )
-        if not enable_button:
-            st.info("To enable: store your OpenRouter API key in your profile and make sure output_set and summary_metrics_csv are available.")
+    user_api_key = get_open_router_api_key()
+    output_set_row = artifacts[artifacts["artifact_type"] == "output_set"]
+    summary_metrics_csv_row = artifacts[artifacts["artifact_type"] == "summary_metrics_csv"]
+    enable_button = user_api_key and not output_set_row.empty and not summary_metrics_csv_row.empty
+    disable_btn = st.session_state.get(summary_shown_key, False)
+    btn = st.button(
+        "Generate AI Set Summary",
+        disabled=not enable_button or disable_btn,
+        key=f"gen_ai_summary_btn_{strategy['metric_id']}"
+    )
+    if not enable_button:
+        st.info("To enable: store your OpenRouter API key in your profile and make sure output_set and summary_metrics_csv are available.")
 
-        # Button click logic - only runs if not disabled
-        if btn and enable_button and not disable_btn:
-            with st.spinner("Generating AI summary via OpenRouter..."):
-                set_file_blob = output_set_row.iloc[0]["file_blob"]
-                summary_metrics_blob = summary_metrics_csv_row.iloc[0]["file_blob"]
-                ai_summary = call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key)
-                if ai_summary:
-                    session = get_db()
-                    try:
-                        store_set_file_summary(session, int(strategy["metric_id"]), ai_summary)
-                        st.success("Set file summary saved!")
-                        # Mark as shown and store last summary in session state
-                        st.session_state[summary_shown_key] = True
-                        st.session_state[f"last_ai_summary_{strategy['metric_id']}"] = ai_summary
-                        st.markdown("### AI Set File Summary")
-                        st.markdown(ai_summary)
-                    except Exception as e:
-                        st.error(f"Failed to save summary: {e}")
-                else:
-                    st.error("Failed to generate AI Set File Summary.")
-
-    else:
+    if btn and enable_button and not disable_btn:
+        with st.spinner("Generating AI summary via OpenRouter..."):
+            set_file_blob = output_set_row.iloc[0]["file_blob"]
+            summary_metrics_blob = summary_metrics_csv_row.iloc[0]["file_blob"]
+            ai_summary = call_open_router_api(set_file_blob, summary_metrics_blob, user_api_key)
+            if ai_summary:
+                session = get_db()
+                try:
+                    store_set_file_summary(session, int(strategy["metric_id"]), ai_summary)
+                    st.success("Set file summary saved!")
+                    st.session_state[summary_shown_key] = True
+                    st.session_state[f"last_ai_summary_{strategy['metric_id']}"] = ai_summary
+                    st.markdown("### AI Set File Summary")
+                    st.markdown(ai_summary)
+                except Exception as e:
+                    st.error(f"Failed to save summary: {e}")
+            else:
+                st.error("Failed to generate AI Set File Summary.")
+else:
+    if len(display_df) == 0:
         st.warning("No strategy data available.")
+    else:
+        st.info("Select a strategy from the table above to view details.")
 
 st.caption("Do not sell or share your personal info")

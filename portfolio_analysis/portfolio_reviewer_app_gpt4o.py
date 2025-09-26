@@ -6,24 +6,19 @@ import io
 import os
 import json
 import re
+import config
+import redis
+from session_manager import is_authenticated, sync_streamlit_session
 
-# --------- REDIS/API KEY SUPPORT (optional, can simplify if not using redis) ---------
+# --------- REDIS/API KEY SUPPORT (unified, uses config.py) ---------
+r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
+
 def get_open_router_api_key():
-    try:
-        import redis
-        r = redis.Redis(
-            host=os.environ.get("REDIS_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_PORT", "6379")),
-            decode_responses=True
-        )
-    except Exception:
-        r = None
-
     key = st.session_state.get("open_router_api_key")
     if key:
         return key
     username = st.session_state.get("username")
-    if username and r:
+    if username:
         val = r.get(f"user:{username}:open_router_api_key")
         if val:
             return val
@@ -138,7 +133,24 @@ def render_ai_review(json_str):
 
 # --------- STREAMLIT UI ---------
 st.set_page_config(page_title="Trading Portfolio AI Review (GPT-4o Multimodal)", layout="wide")
+st.markdown(
+    """
+    <style>
+    .block-container { max-width: 100% !important; padding: 2rem 2rem 2rem 2rem; }
+    .element-container { width: 100% !important; }
+    .stDataFrame, .stSelectbox, .stDataEditor, .stTextInput, .stTextArea { width: 100% !important; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 st.title("📊 Trading Portfolio AI Review (GPT-4o Multimodal)")
+
+# --- Auth & session check ---
+from session_manager import is_authenticated, sync_streamlit_session
+if not is_authenticated(st.session_state):
+    st.warning("You must be logged in to use this tool.")
+    st.stop()
+sync_streamlit_session(st.session_state, st.session_state.get("username"))
 
 st.markdown(
     f"""
@@ -180,9 +192,8 @@ if open_img:
     img_labels.append("Open Trades")
 
 for label, img in zip(img_labels, uploaded_imgs):
-    st.image(img, caption=f"{label} Screenshot", use_container_width=True)
+    st.image(img, caption=f"{label} Screenshot", width="stretch")
 
-# Session state for last response
 if "last_response" not in st.session_state:
     st.session_state["last_response"] = None
 
@@ -191,7 +202,6 @@ submit = st.button("Process with AI", disabled=not (uploaded_imgs and api_key an
 if submit:
     with st.spinner("Sending image(s) to OpenRouter GPT-4o..."):
         img_b64_list = [image_to_base64(img) for img in uploaded_imgs]
-        # Set temperature=0 for deterministic output
         ai_response_text = call_openrouter_multimodal(api_key, img_b64_list, prompt_template, temperature=0)
         st.session_state["last_response"] = ai_response_text
     st.markdown("---")

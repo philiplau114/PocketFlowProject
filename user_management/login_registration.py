@@ -1,8 +1,5 @@
 import streamlit as st
 import sqlalchemy
-import redis
-import uuid
-import bcrypt
 import sys
 import os
 from datetime import datetime
@@ -12,43 +9,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from db_utils import get_db, create_user, fetch_user_by_username
 from db.db_models import User
-from config import REDIS_HOST, REDIS_PORT
-
-# --- REDIS SESSION ---
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-SESSION_PREFIX = "session:"
-
-def login_backend(username, password):
-    db_session = get_db()
-    user = fetch_user_by_username(db_session, username)
-    if not user:
-        return None, "User not found"
-    if user.status != "Approved":
-        return None, "User not approved"
-    if not user.verify_password(password):
-        return None, "Incorrect password"
-    session_token = str(uuid.uuid4())
-    redis_client.setex(SESSION_PREFIX + session_token, 86400, username)
-    return session_token, user  # Return both token and user object
-
-def register_backend(username, email, password, api_key):
-    db_session = get_db()
-    if fetch_user_by_username(db_session, username):
-        return None, "Username already exists"
-    password_hash = User.hash_password(password)
-    user_id = create_user(db_session, username, email, password_hash, api_key)
-    return user_id, None
-
-def get_user_by_token(session_token):
-    username = redis_client.get(SESSION_PREFIX + session_token)
-    if username:
-        db_session = get_db()
-        return fetch_user_by_username(db_session, username.decode())
-    return None
+import config
+from session_manager import create_session, delete_session, get_session, is_authenticated, sync_streamlit_session
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Login / Registration", layout="centered")
-st.markdown("<h1 style='text-align: center;'>PocketFlow Login / Registration</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>Portfolio Lab Login / Registration</h1>", unsafe_allow_html=True)
 
 tab_login, tab_register = st.tabs(["Login", "Register"])
 
@@ -60,21 +26,31 @@ with tab_login:
     login_submit = login_form.form_submit_button("Login")
 
     if login_submit:
-        session_token, user_or_error = login_backend(username, password)
-        if session_token and user_or_error:
-            user = user_or_error
-            st.session_state["session_token"] = session_token
-            st.session_state["username"] = user.username
-            st.session_state["user_role"] = user.role  # Set role for main.py sidebar
-            st.session_state["open_router_api_key"] = user.open_router_api_key
+        db_session = get_db()
+        user = fetch_user_by_username(db_session, username)
+        if not user:
+            st.error("User not found")
+        elif user.status != "Approved":
+            st.error("User not approved")
+        elif not user.verify_password(password):
+            st.error("Incorrect password")
+        else:
+            # Create session in Redis
+            session_data = {
+                "username": user.username,
+                "user_role": user.role,
+                "open_router_api_key": user.open_router_api_key,
+                "status": user.status
+            }
+            create_session(user.username, session_data)
+            for k, v in session_data.items():
+                st.session_state[k] = v
             st.success("Login successful!")
             if user.status != "Approved":
                 st.info("Your account is awaiting admin approval.")
             else:
                 st.info("You are logged in.")
-            st.rerun()  # <<< Force rerun so main.py shows sidebar
-        else:
-            st.error(user_or_error if isinstance(user_or_error, str) else "Login failed.")
+            st.rerun()  # Force rerun so main.py shows sidebar
 
 with tab_register:
     st.subheader("Register")
@@ -86,31 +62,33 @@ with tab_register:
     reg_submit = reg_form.form_submit_button("Register")
 
     if reg_submit:
-        user_id, error = register_backend(reg_username, reg_email, reg_password, reg_api_key)
-        if user_id:
-            st.success("Registration submitted! Please await admin approval.")
+        db_session = get_db()
+        if fetch_user_by_username(db_session, reg_username):
+            st.error("Username already exists")
         else:
-            st.error(error)
+            password_hash = User.hash_password(reg_password)
+            user_id = create_user(db_session, reg_username, reg_email, password_hash, reg_api_key)
+            if user_id:
+                st.success("Registration submitted! Please await admin approval.")
+            else:
+                st.error("Registration failed.")
 
 # --- Show session info if logged in ---
-if "session_token" in st.session_state:
-    user = get_user_by_token(st.session_state["session_token"])
-    # Sync username and user_role into session_state for proper sidebar logic
+if is_authenticated(st.session_state):
+    sync_streamlit_session(st.session_state, st.session_state["username"])
+    user = fetch_user_by_username(get_db(), st.session_state["username"])
     if user:
-        st.session_state["username"] = user.username
-        st.session_state["user_role"] = user.role
         st.info(f"Logged in as: {user.username} | Role: {user.role} | Status: {user.status}")
         logout_btn = st.button("Logout")
         if logout_btn:
-            redis_client.delete(SESSION_PREFIX + st.session_state["session_token"])
-            st.session_state.pop("session_token")
-            st.session_state.pop("username", None)
-            st.session_state.pop("user_role", None)
+            delete_session(st.session_state["username"])
+            for key in ["username", "user_role", "open_router_api_key"]:
+                st.session_state.pop(key, None)
             st.success("Logged out successfully!")
-            st.experimental_rerun()  # Rerun so main.py shows only login/register
+            st.rerun()  # Rerun so main.py shows only login/register
 
-st.markdown("""
-<div style='text-align: center; color: #999; margin-top:2em'>
-  &copy; 2025 PocketFlowProject. Powered by Streamlit.
-</div>
-""", unsafe_allow_html=True)
+# st.markdown("""
+# <div style='text-align: center; color: #999; margin-top:2em'>
+#   &copy; 2025 PocketFlowProject. Powered by Streamlit.
+# </div>
+# """, unsafe_allow_html=True)

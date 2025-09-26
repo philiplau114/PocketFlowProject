@@ -11,19 +11,32 @@ from db_utils import (
     get_portfolio_currency_correlation,
     aggregate_correlation,
 )
+import config
+from session_manager import is_authenticated, sync_streamlit_session
 
 import seaborn as sns
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Portfolio Management", layout="wide")
+st.markdown(
+    """
+    <style>
+    .block-container { max-width: 100% !important; padding: 2rem 2rem 2rem 2rem; }
+    .element-container { width: 100% !important; }
+    .stDataFrame, .stSelectbox, .stDataEditor { width: 100% !important; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 st.title("💼 Portfolio Management")
 
 # --- AUTH CHECK ---
-username = st.session_state.get("username")
-user_role = st.session_state.get("user_role")
-if not username or not user_role or user_role == "Guest":
+if not is_authenticated(st.session_state):
     st.warning("You must be logged in as a Trader to view this page.")
     st.stop()
+sync_streamlit_session(st.session_state, st.session_state["username"])
+username = st.session_state.get("username")
+user_role = st.session_state.get("user_role")
 
 session = get_db()
 
@@ -61,13 +74,44 @@ st.write(f"**Description:** {portfolio.description}")
 # --- Strategies in Portfolio & Remove ---
 portfolio_df = get_portfolio_strategies(session, portfolio.id)
 st.subheader("Strategies in Portfolio")
-if not portfolio_df.empty:
-    st.dataframe(portfolio_df[["set_file_name", "symbol", "net_profit", "weighted_score", "win_rate"]], use_container_width=True)
+
+max_portfolio_page_size = min(50, len(portfolio_df))
+portfolio_page_size = st.number_input(
+    "Records per page (Portfolio strategies)", 
+    min_value=1, 
+    max_value=max_portfolio_page_size if max_portfolio_page_size > 0 else 1, 
+    value=min(10, max_portfolio_page_size if max_portfolio_page_size > 0 else 1), 
+    step=1
+)
+
+portfolio_num_pages = max((len(portfolio_df) - 1) // portfolio_page_size + 1, 1)
+portfolio_page_num = st.number_input(
+    "Portfolio Page", 
+    min_value=1, 
+    max_value=portfolio_num_pages, 
+    value=1, 
+    step=1
+)
+portfolio_start_idx = (portfolio_page_num - 1) * portfolio_page_size
+portfolio_end_idx = portfolio_start_idx + portfolio_page_size
+portfolio_paged_df = portfolio_df.iloc[portfolio_start_idx:portfolio_end_idx].reset_index(drop=True)
+
+if not portfolio_paged_df.empty:
+    max_setfile_len = portfolio_paged_df["set_file_name"].map(len).max() if "set_file_name" in portfolio_paged_df else 20
+    setfile_col_width = min(max(200, max_setfile_len * 9), 600)
+    st.data_editor(
+        portfolio_paged_df[["set_file_name", "symbol", "net_profit", "weighted_score", "win_rate"]],
+        width="stretch",
+        hide_index=True,
+        column_config={"set_file_name": st.column_config.Column(width=setfile_col_width)},
+        disabled=True,
+        key="portfolio_strategy_table"
+    )
     with st.expander("Remove strategies from portfolio"):
         remove_ids = st.multiselect(
             "Select strategies to remove",
-            portfolio_df["metric_id"].tolist(),
-            format_func=lambda x: portfolio_df[portfolio_df["metric_id"]==x]["set_file_name"].values[0]
+            portfolio_paged_df["metric_id"].tolist(),
+            format_func=lambda x: portfolio_paged_df[portfolio_paged_df["metric_id"]==x]["set_file_name"].values[0]
         )
         if st.button("Remove Selected"):
             for metric_id in remove_ids:
@@ -78,21 +122,49 @@ else:
     st.info("Your portfolio is empty. Add strategies below.")
 
 st.markdown("---")
-# --- Available Strategies to Add ---
 st.subheader("Available Strategies")
 available_df = load_available_strategies(session)
+max_available_page_size = min(50, len(available_df))
+available_page_size = st.number_input(
+    "Records per page (Available strategies)", 
+    min_value=1, 
+    max_value=max_available_page_size if max_available_page_size > 0 else 1, 
+    value=min(10, max_available_page_size if max_available_page_size > 0 else 1), 
+    step=1
+)
+
+available_num_pages = max((len(available_df) - 1) // available_page_size + 1, 1)
+available_page_num = st.number_input(
+    "Available Strategies Page", 
+    min_value=1, 
+    max_value=available_num_pages, 
+    value=1, 
+    step=1
+)
+available_start_idx = (available_page_num - 1) * available_page_size
+available_end_idx = available_start_idx + available_page_size
+available_paged_df = available_df.iloc[available_start_idx:available_end_idx].reset_index(drop=True)
+
 if not available_df.empty:
-    # Exclude those already in portfolio
-    available_df = available_df[
-        ~available_df["metric_id"].isin(
+    available_paged_df = available_paged_df[
+        ~available_paged_df["metric_id"].isin(
             portfolio_df["metric_id"] if not portfolio_df.empty else []
         )
     ]
-    st.dataframe(available_df, use_container_width=True)
+    max_setfile_len_avail = available_paged_df["set_file_name"].map(len).max() if not available_paged_df.empty else 20
+    setfile_col_width_avail = min(max(200, max_setfile_len_avail * 9), 600)
+    st.data_editor(
+        available_paged_df,
+        width="stretch",
+        hide_index=True,
+        column_config={"set_file_name": st.column_config.Column(width=setfile_col_width_avail)},
+        disabled=True,
+        key="available_strategy_table"
+    )
     add_ids = st.multiselect(
         "Select strategies to add",
-        available_df["metric_id"].tolist(),
-        format_func=lambda x: available_df[available_df["metric_id"]==x]["set_file_name"].values[0]
+        available_paged_df["metric_id"].tolist(),
+        format_func=lambda x: available_paged_df[available_paged_df["metric_id"]==x]["set_file_name"].values[0]
     )
     if st.button("Add Selected"):
         for metric_id in add_ids:
@@ -103,28 +175,28 @@ else:
     st.info("No strategies available for portfolio.")
 
 st.markdown("---")
-# --- Portfolio Analysis & Tools ---
 st.subheader("Portfolio Analysis & Tools")
 if not portfolio_df.empty:
-    # Example: Download all set files in portfolio
     if st.button("Download Portfolio Set Files"):
-        # Placeholder: In real app, bundle files and serve
         st.info("Download feature coming soon.")
 
-    # --- Currency Correlation Assessment ---
     st.markdown("**Currency Correlation Assessment:**")
     corr_df = get_portfolio_currency_correlation(session, portfolio.id, timeframe='H1')
     if not corr_df.empty:
         st.write("#### Pairwise Currency Correlations (H1 timeframe)")
-        st.dataframe(corr_df, use_container_width=True)
+        st.data_editor(
+            corr_df,
+            width="stretch",
+            hide_index=True,
+            disabled=True,
+            key="corr_table"
+        )
         agg = aggregate_correlation(corr_df)
         st.write(f"**Average Correlation:** {agg['average_correlation']:.2f}")
         st.write(f"**Max Correlation:** {agg['max_correlation']:.2f}")
         if agg['high_corr_pairs']:
             st.warning(f"Highly correlated pairs (>0.7): {agg['high_corr_pairs']}")
-        # --- Heatmap Visualization ---
         st.write("#### Correlation Heatmap")
-        # Pivot to symmetric matrix for heatmap
         heatmap_matrix = corr_df.pivot(index="symbol1", columns="symbol2", values="correlation")
         fig, ax = plt.subplots()
         sns.heatmap(heatmap_matrix, annot=True, fmt=".2f", cmap="coolwarm", ax=ax)
@@ -132,7 +204,6 @@ if not portfolio_df.empty:
     else:
         st.info("No correlation data found for selected strategies.")
 
-    # --- Position sizing & Monte Carlo risk assessment ---
     st.markdown("**Position Sizing & Monte Carlo Risk Analysis:**")
     st.info("Position sizing and risk analytics will be shown here.")
 
