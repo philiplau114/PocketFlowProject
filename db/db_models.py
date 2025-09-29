@@ -55,8 +55,8 @@ class ControllerJob(Base):
     status = Column(String(32))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    max_attempts = Column(Integer)
-    attempt_count = Column(Integer)
+    max_attempts = Column(Integer) # WARNING: Not used in current logic
+    attempt_count = Column(Integer) # WARNING: Not used in current logic
     trace_json = Column(Text)
 
     tasks = relationship("ControllerTask", back_populates="job")

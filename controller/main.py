@@ -40,7 +40,6 @@ stop_flag = False
 
 import logging
 
-
 def handle_terminal_task(r, task):
     """
     Handles cleanup for tasks reaching terminal status.
@@ -140,10 +139,27 @@ def main_loop():
         for file in Path(config.WATCH_FOLDER).glob("*.set"):
             try:
                 logging.debug(f"Processing file: {file}")
-                meta = extract_setfile_metadata(str(file))
-                logging.debug(f"Metadata extracted: {meta}")
+                # NEW: Look for a .meta.json file with metadata (user_id, symbol, timeframe, ea_name, original_filename)
+                meta_path = str(file) + ".meta.json"
+                meta_data = None
+                user_id = config.USER_ID  # default fallback
+
+                if os.path.exists(meta_path):
+                    # Load metadata from .meta.json
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta_json = json.load(f)
+                    # Extract user_id and the rest of the fields
+                    user_id = meta_json.get("user_id", config.USER_ID)
+                    # Only pass relevant fields to insert_job_and_task
+                    meta_data = {k: meta_json[k] for k in ["symbol", "timeframe", "ea_name", "original_filename"] if k in meta_json}
+                    logging.debug(f"Loaded metadata from {meta_path}: {meta_data} with user_id={user_id}")
+                else:
+                    # Fallback: extract from .set file itself (legacy)
+                    meta_data = extract_setfile_metadata(str(file))
+                    logging.debug(f"Metadata extracted from .set file: {meta_data}")
+
                 with get_db() as session:
-                    job_id, task_id, is_new = insert_job_and_task(session, meta, str(file), user_id=config.USER_ID)
+                    job_id, task_id, is_new = insert_job_and_task(session, meta_data, str(file), user_id=user_id)
                     logging.debug(f"job_id={job_id}, task_id={task_id}, is_new={is_new}")
                     if not is_new:
                         logging.debug(f"Skipping {file} as job/task already exists.")
@@ -157,9 +173,11 @@ def main_loop():
                     # DO NOT set status to 'queued' here; keep as STATUS_NEW
                     session.commit()
                     print("DEBUG: file_blob committed to DB")
-                #shutil.move(str(file), str(config.PROCESSED_FOLDER / file.name))
+                # Move both the .set file and its .meta.json (if exists) to processed folder
                 shutil.move(str(file), os.path.join(config.PROCESSED_FOLDER, file.name))
-                logging.info(f"Moved processed file {file.name} to {config.PROCESSED_FOLDER}")
+                if os.path.exists(meta_path):
+                    shutil.move(meta_path, os.path.join(config.PROCESSED_FOLDER, os.path.basename(meta_path)))
+                logging.info(f"Moved processed file {file.name} and meta to {config.PROCESSED_FOLDER}")
                 logging.debug(f"Task for file {file.name} processed and ready for queueing.")
                 logging.info("Created new task: %s (using file_blob)", file.name)
             except Exception as e:
@@ -220,8 +238,15 @@ def main_loop():
                         elif partial:
                             mark_task_partial(session, task)
                             terminal_status = True
-                            logging.info(f"Task {task.id} marked as PARTIAL (at least one metric passed one threshold).")
-                            # Fine-tune child will be handled in the queueing logic (not here).
+                            logging.info(
+                                f"Task {task.id} marked as PARTIAL (at least one metric passed one threshold).")
+                            # Automatically spawn fine-tune if eligible
+                            if (task.fine_tune_depth or 0) < config.MAX_FINE_TUNE_DEPTH:
+                                try:
+                                    spawn_fine_tune_task(session, task)
+                                    logging.info(f"Spawned fine-tune task for parent task {task.id}")
+                                except Exception as e:
+                                    logging.error(f"Could not spawn fine-tune task for {task.id}: {e}")
                         else:
                             # Case 3: Fail/Retry -- no metrics passed
                             if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):

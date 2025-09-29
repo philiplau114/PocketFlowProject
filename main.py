@@ -41,7 +41,8 @@ if is_logged_in():
         options = [
             "Strategy Dashboard",
             "Portfolio Management",
-            "Portfolio Reviewer (AI)",  # NEW PAGE
+            "Portfolio Reviewer (AI)",
+            "Optimization Dashboard",  # <-- Added here
             "Settings / Profile"
         ]
         if is_admin():
@@ -88,6 +89,17 @@ elif page == "Portfolio Reviewer (AI)":
             import_module_from_file(
                 "portfolio_reviewer_app",
                 os.path.join("portfolio_analysis", "portfolio_reviewer_app_gpt4o.py")
+            )
+
+elif page == "Optimization Dashboard":
+    if not is_standard_user():
+        st.error("You must be a Standard/Trader user to access this page.")
+    else:
+        st.query_params["page"] = "optimization_dashboard"
+        with st.spinner("Loading Optimization Dashboard..."):
+            import_module_from_file(
+                "optimization_dashboard",
+                os.path.join("streamlit", "optimization_dashboard.py")
             )
 
 elif page == "Settings / Profile":

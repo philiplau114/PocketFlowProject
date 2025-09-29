@@ -60,26 +60,37 @@ def extract_setfile_metadata(setfile_path):
         "timeframe": fields.get("Timeframe", ""),
     }
 
-def insert_job_and_task(session, meta, set_file_path, user_id="system"):
-    existing_job = session.query(ControllerJob).filter_by(
-        original_file=set_file_path
-    ).first()
-    if existing_job:
-        existing_task = session.query(ControllerTask).filter_by(
-            job_id=existing_job.id,
-            file_path=set_file_path
-        ).first()
-        return existing_job.id, existing_task.id if existing_task else None, False
+def insert_job_and_task(session, meta, set_file_path, user_id="system", allow_duplicate=False):
+    """
+    Insert a new job and its first task.
+    - If allow_duplicate is False (default), check if a job/task with this set_file_path already exists and return if so.
+    - If allow_duplicate is True, always create a new job/task, even if path matches a previous one (for re-optimize).
+    - max_attempts for both job and task are set from config (not hardcoded).
+    """
+    from config import TASK_MAX_ATTEMPTS  # Or use MAX_ATTEMPTS if that's your config variable name
 
+    # Only block duplicates if allow_duplicate is False (default)
+    if not allow_duplicate:
+        existing_job = session.query(ControllerJob).filter_by(
+            original_file=set_file_path
+        ).first()
+        if existing_job:
+            existing_task = session.query(ControllerTask).filter_by(
+                job_id=existing_job.id,
+                file_path=set_file_path
+            ).first()
+            return existing_job.id, existing_task.id if existing_task else None, False
+
+    # Always create new job/task if allow_duplicate=True
     job = ControllerJob(
         user_id=user_id,
         job_type="optimization",
-        symbol=meta["symbol"],
-        timeframe=meta["timeframe"],
-        ea_name=meta["ea_name"],
+        symbol=meta.get("symbol", ""),
+        timeframe=meta.get("timeframe", ""),
+        ea_name=meta.get("ea_name", ""),
         original_file=set_file_path,
         status=STATUS_NEW,
-        max_attempts=1,
+        max_attempts=TASK_MAX_ATTEMPTS,
         attempt_count=0,
     )
     session.add(job)
@@ -91,9 +102,9 @@ def insert_job_and_task(session, meta, set_file_path, user_id="system"):
         status=STATUS_NEW,
         assigned_worker=None,
         file_path=set_file_path,
-        description=f"Optimization for {meta['ea_name']}",
+        description=f"Optimization for {meta.get('ea_name', '')}",
         attempt_count=0,
-        max_attempts=1,
+        max_attempts=TASK_MAX_ATTEMPTS,
     )
     session.add(task)
     safe_commit(session)

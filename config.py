@@ -4,14 +4,32 @@ import sqlalchemy
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Paths to env files
+# Guess role from script location
+script_dir = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+# Fallback: use the script that launched Python if you're running from controller/main.py or worker/main.py
+if '__main__' in globals():
+    # Use the script that actually launched the process
+    try:
+        import sys
+        runner_dir = os.path.basename(os.path.dirname(os.path.abspath(sys.argv[0])))
+        if runner_dir in ["controller", "worker"]:
+            script_dir = runner_dir
+    except Exception:
+        pass
+
 ENV_PATH = os.path.join(PROJECT_ROOT, '.env')
 ENV_CONTROLLER_PATH = os.path.join(PROJECT_ROOT, 'controller', '.env.controller')
 ENV_WORKER_PATH = os.path.join(PROJECT_ROOT, 'worker', '.env.worker')
 
+# --- Always load base .env
 load_dotenv(ENV_PATH, override=False)
-load_dotenv(ENV_CONTROLLER_PATH, override=True)
-load_dotenv(ENV_WORKER_PATH, override=True)
+
+# --- Load controller or worker specific .env
+if script_dir == "controller":
+    load_dotenv(ENV_CONTROLLER_PATH, override=True)
+elif script_dir == "worker":
+    load_dotenv(ENV_WORKER_PATH, override=True)
+# else: don't override, just leave base .env
 
 # Database
 SQLALCHEMY_DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URL')
