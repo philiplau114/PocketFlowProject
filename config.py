@@ -1,21 +1,9 @@
 import os
+import sys
 from dotenv import load_dotenv
 import sqlalchemy
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-
-# Guess role from script location
-script_dir = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
-# Fallback: use the script that launched Python if you're running from controller/main.py or worker/main.py
-if '__main__' in globals():
-    # Use the script that actually launched the process
-    try:
-        import sys
-        runner_dir = os.path.basename(os.path.dirname(os.path.abspath(sys.argv[0])))
-        if runner_dir in ["controller", "worker"]:
-            script_dir = runner_dir
-    except Exception:
-        pass
 
 ENV_PATH = os.path.join(PROJECT_ROOT, '.env')
 ENV_CONTROLLER_PATH = os.path.join(PROJECT_ROOT, 'controller', '.env.controller')
@@ -24,12 +12,49 @@ ENV_WORKER_PATH = os.path.join(PROJECT_ROOT, 'worker', '.env.worker')
 # --- Always load base .env
 load_dotenv(ENV_PATH, override=False)
 
-# --- Load controller or worker specific .env
-if script_dir == "controller":
+# --- Robust role detection ---
+def detect_role():
+    # First, try the explicit environment variable (recommended for future-proofing)
+    role = os.getenv("ROLE")
+    if role in ("worker", "controller"):
+        return role
+    # Next, check sys.argv[0]
+    argv0 = sys.argv[0].lower()
+    if "worker" in argv0:
+        return "worker"
+    if "controller" in argv0:
+        return "controller"
+    # Next, check current working directory
+    cwd = os.getcwd().lower()
+    if "worker" in cwd:
+        return "worker"
+    if "controller" in cwd:
+        return "controller"
+    # Fallback: check parent directory of this file (not robust if config.py is at project root)
+    script_dir = os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+    if script_dir in ("worker", "controller"):
+        return script_dir
+    return None
+
+ROLE = detect_role()
+print(f"[config.py DEBUG] ROLE detected: {ROLE}")
+print(f"[config.py DEBUG] sys.argv[0]: {sys.argv[0]}")
+print(f"[config.py DEBUG] cwd: {os.getcwd()}")
+
+# --- Load controller or worker specific .env ---
+if ROLE == "controller":
+    print("[config.py DEBUG] Loading controller .env.controller")
     load_dotenv(ENV_CONTROLLER_PATH, override=True)
-elif script_dir == "worker":
+elif ROLE == "worker":
+    print("[config.py DEBUG] Loading worker .env.worker")
     load_dotenv(ENV_WORKER_PATH, override=True)
-# else: don't override, just leave base .env
+else:
+    print("[config.py DEBUG] Not loading specific .env for role (ROLE not recognized)")
+
+# --- DEBUG: Print key env variables to confirm they are loaded ---
+print(f"[config.py DEBUG] SQLCIPHER_KEY: {os.getenv('SQLCIPHER_KEY')}")
+print(f"[config.py DEBUG] SQLALCHEMY_DATABASE_URL: {os.getenv('SQLALCHEMY_DATABASE_URL')}")
+print(f"[config.py DEBUG] UIPATH_MT4_LIB: {os.getenv('UIPATH_MT4_LIB')}")
 
 # Database
 SQLALCHEMY_DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URL')
