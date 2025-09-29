@@ -163,20 +163,18 @@ def main():
                         continue
 
                     notify_stuck_task(task)
-                    if current_attempt + 1 < max_attempts:
+                    if current_attempt < max_attempts:
                         # Ensure file_blob is present in Redis before requeue
                         if not ensure_file_blob_in_redis(r, task, session):
                             continue  # file_blob missing and cannot be restored, already marked as failed
 
+                        # Only set status to 'retrying' — do not push to Redis or increment attempt_count
                         requeue_task(session, task)
                         logging.warning(
-                            f"Task {task.id} ({task.file_path}) stuck for over {config.JOB_STUCK_THRESHOLD_MINUTES} min. Retrying (attempt {current_attempt + 1}/{max_attempts})."
+                            f"Task {task.id} ({task.file_path}) stuck for over {config.JOB_STUCK_THRESHOLD_MINUTES} min. Marked as retrying (attempt {current_attempt + 1}/{max_attempts})."
                         )
                         notify_task_retry(task, current_attempt)
-                        # Requeue in Redis main queue in controller_utils-compatible format
-                        task_data = build_task_data_for_redis(task)
-                        task_json = json.dumps(task_data)
-                        r.lpush(config.REDIS_MAIN_QUEUE, task_json)
+                        # DO NOT PUSH TO REDIS HERE!
                     else:
                         # Max attempts reached, mark as failed
                         task.status = "failed"
@@ -186,7 +184,7 @@ def main():
                         )
                         notify_task_failed(task)
 
-                # --- Handle Inactive Workers ---
+                # --- Handle Inactive Workers (unchanged) ---
                 inactive_workers = get_inactive_workers(
                     session, threshold_minutes=config.WORKER_INACTIVE_THRESHOLD_MINUTES
                 )
@@ -196,7 +194,7 @@ def main():
                     )
                     notify_inactive_worker(worker_id, config.WORKER_INACTIVE_THRESHOLD_MINUTES)
 
-                # --- Reconcile DB and Redis queue ---
+                # --- Reconcile DB and Redis queue (unchanged) ---
                 reconcile_db_redis(session, r)
 
         except Exception as e:

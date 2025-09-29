@@ -200,22 +200,15 @@ def get_stuck_tasks(session, threshold_minutes=60):
     ).all()
 
 def requeue_task(session, task):
+    """
+    Sets a stuck task's status to 'retrying' and updates its timestamp.
+    Does NOT increment attempt_count.
+    Only the controller should increment attempt_count when actually queuing to worker.
+    """
     locked_task = session.query(ControllerTask).filter(ControllerTask.id == task.id).with_for_update().first()
     if locked_task and locked_task.status != "failed":
-        locked_task.status = "failed"
-        safe_commit(session)
-        new_task = ControllerTask(
-            job_id=locked_task.job_id,
-            step_number=locked_task.step_number,
-            step_name=locked_task.step_name,
-            status="queued",
-            assigned_worker=None,
-            file_path=locked_task.file_path,
-            description=locked_task.description,
-            attempt_count=0,
-            max_attempts=locked_task.max_attempts,
-        )
-        session.add(new_task)
+        locked_task.status = "retrying"
+        locked_task.updated_at = datetime.utcnow()
         safe_commit(session)
 
 def get_inactive_workers(session, threshold_minutes=5):
