@@ -30,7 +30,11 @@ if MT4_OPTIMIZER_PATH and MT4_OPTIMIZER_PATH not in sys.path:
     sys.path.append(MT4_OPTIMIZER_PATH)
 import extract_setfilename_fields
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=3600  # Optional
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 SYMBOL_LIST = extract_setfilename_fields.load_symbol_list(SYMBOL_CSV_PATH)
