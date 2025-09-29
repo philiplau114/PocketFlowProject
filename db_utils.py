@@ -121,32 +121,57 @@ def job_has_success(session, job_id):
     ).count() > 0
 
 def update_job_status(session, job_id):
+    """
+    Job Status Update Design
+
+    The update_job_status function determines the overall status of a job by examining the statuses of all its associated tasks.
+    The status assignment follows these rules, in priority order:
+
+    1. If any task is in an in-progress state (NEW, QUEUED, WORKER_IN_PROGRESS, RETRYING, or FINE_TUNING),
+       the job is considered IN_PROGRESS. This ensures the job remains active while any work is ongoing.
+
+    2. Otherwise, if any task has COMPLETED_SUCCESS status, the job is marked as COMPLETED_SUCCESS.
+       This means the job is considered successful if at least one of its tasks succeeded, regardless of the outcome of other tasks.
+
+    3. Otherwise, if all tasks have FAILED status, the job is marked as FAILED.
+       This covers the scenario where every attempt for the job has been unsuccessful.
+
+    4. Otherwise (i.e., not in-progress, not any success, not all failed), the job is marked as COMPLETED_PARTIAL.
+       This typically captures cases where some tasks are partially complete (e.g., COMPLETED_PARTIAL) but none fully succeeded.
+
+    This design prioritizes IN_PROGRESS above all, then considers any success as a job-level success, then full failure, and finally partial completion.
+    It is intentionally optimistic: any success elevates the job to a successful state.
+
+    Example Scenarios:
+    - If any task is still running, the job is IN_PROGRESS.
+    - If any task succeeded, the job is COMPLETED_SUCCESS (even if some failed or are partial).
+    - If all tasks failed, the job is FAILED.
+    - If some tasks are partial (but none succeeded and none are running), the job is COMPLETED_PARTIAL.
+
+    This logic ensures the job status gives a clear, actionable summary at a glance.
+    """
     job = session.query(ControllerJob).filter(ControllerJob.id == job_id).with_for_update().first()
     if not job:
         return
     tasks = session.query(ControllerTask).filter(ControllerTask.job_id == job_id).all()
     if not tasks:
         return
-    statuses = set([t.status for t in tasks])
+
+    statuses = set(t.status for t in tasks)
     in_progress_statuses = {
         STATUS_NEW, STATUS_QUEUED, STATUS_WORKER_IN_PROGRESS,
         STATUS_RETRYING, STATUS_FINE_TUNING
     }
+
     if statuses & in_progress_statuses:
         new_status = JOB_STATUS_IN_PROGRESS
+    elif any(t.status == STATUS_COMPLETED_SUCCESS for t in tasks):
+        new_status = JOB_STATUS_COMPLETED_SUCCESS
+    elif all(t.status == STATUS_FAILED for t in tasks):
+        new_status = JOB_STATUS_FAILED
     else:
-        all_success = all(t.status == STATUS_COMPLETED_SUCCESS for t in tasks)
-        any_success = any(t.status == STATUS_COMPLETED_SUCCESS for t in tasks)
-        any_partial = any(t.status == STATUS_COMPLETED_PARTIAL for t in tasks)
-        any_failed = any(t.status == STATUS_FAILED for t in tasks)
-        if all_success:
-            new_status = JOB_STATUS_COMPLETED_SUCCESS
-        elif any_success:
-            new_status = JOB_STATUS_COMPLETED_PARTIAL
-        elif any_partial or any_failed:
-            new_status = JOB_STATUS_FAILED
-        else:
-            new_status = JOB_STATUS_FAILED
+        new_status = JOB_STATUS_COMPLETED_PARTIAL
+
     if job.status != new_status:
         job.status = new_status
         safe_commit(session)
