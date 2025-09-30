@@ -183,24 +183,22 @@ def mark_task_retrying(session, task):
 
 # --- Fine-tune Logic for Partial Tasks ---
 def handle_partial_tasks(session):
-    """
-    Scan for STATUS_COMPLETED_PARTIAL tasks and spawn fine-tune child if not already exists.
-    This is idempotent (safe to run repeatedly).
-    """
-    # Find all partial tasks that have not yet spawned a fine-tune child
+    logging.info("handle_partial_tasks: starting")
     partial_tasks = session.query(ControllerTask).filter(
         ControllerTask.status == STATUS_COMPLETED_PARTIAL
     ).all()
+    logging.info(f"handle_partial_tasks: found {len(partial_tasks)} partial tasks")
     for task in partial_tasks:
-        # Check if fine-tune child already exists for this parent
+        logging.info(f"handle_partial_tasks: checking partial task {task.id}, fine_tune_depth={task.fine_tune_depth}")
         exists = session.query(ControllerTask).filter_by(
             parent_task_id=task.id, step_name='fine_tune'
         ).count() > 0
-        # Only spawn fine-tune if eligible and not already spawned
+        logging.info(f"handle_partial_tasks: fine-tune child exists for {task.id}? {exists}")
         if not exists and (task.fine_tune_depth or 0) < config.MAX_FINE_TUNE_DEPTH:
             try:
-                spawn_fine_tune_task(session, task)
-                logging.info(f"Spawned fine-tune task for partial parent {task.id}")
+                logging.info(f"handle_partial_tasks: spawning fine-tune for {task.id}")
+                ft_task = spawn_fine_tune_task(session, task)
+                logging.info(f"handle_partial_tasks: spawned fine-tune task {ft_task.id} for parent {task.id}")
             except Exception as e:
                 logging.error(f"Could not spawn fine-tune task for {task.id}: {e}")
 
