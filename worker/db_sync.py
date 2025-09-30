@@ -36,30 +36,8 @@ def controller_db_session():
         engine.dispose()
 
 def link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id):
-    select_sql = """
-        SELECT a.id AS artifact_id, t.id AS test_metrics_id, a.link_id
-        FROM controller_artifacts a
-        JOIN test_metrics t
-          ON t.controller_task_id = a.task_id
-          AND a.artifact_type = 'output_set'
-          AND a.file_name = t.set_file_name
-          AND a.file_blob IS NOT NULL
-        WHERE a.task_id = %s
-    """
-    update_sql = """
-        UPDATE controller_artifacts
-        SET link_type = 'test_metrics', link_id = %s
-        WHERE link_id = %s
-    """
     cursor = ctrl_conn.cursor()
-    cursor.execute(select_sql, (controller_task_id,))
-    results = cursor.fetchall()
-    count = 0
-    for artifact_id, test_metrics_id, link_id in results:
-        if link_id != test_metrics_id:
-            cursor.execute(update_sql, (test_metrics_id, link_id))
-            count += 1
-    #print(f"[DEBUG] Linked {count} artifacts to test_metrics for controller_task_id={controller_task_id}")
+    cursor.callproc('controller_artifacts_data_link', (controller_task_id,))
     cursor.close()
 
 def sync_trade_records(step_id, test_metrics_id, ctrl_conn):

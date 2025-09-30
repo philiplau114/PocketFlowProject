@@ -39,18 +39,18 @@ def spawn_fine_tune_task(session, parent_task):
     Commits and returns new task and the file_blob (optional).
     """
     from db.db_models import ControllerTask, ControllerArtifact
-    from sqlalchemy import and_
+    from sqlalchemy import and_, text  # <-- Added text import
     from datetime import datetime
 
     # 1. Find the "best" test_metrics for this parent task (lowest distance, highest score)
     best_metric = session.execute(
-        """
-        SELECT tm.id
-        FROM test_metrics tm
-        WHERE tm.controller_task_id = :task_id
-        ORDER BY tm.normalized_total_distance_to_good ASC, tm.weighted_score DESC
-        LIMIT 1
-        """, {"task_id": parent_task.id}
+        text("""
+            SELECT tm.id
+            FROM test_metrics tm
+            WHERE tm.controller_task_id = :task_id
+            ORDER BY tm.normalized_total_distance_to_good ASC, tm.weighted_score DESC
+            LIMIT 1
+        """), {"task_id": parent_task.id}
     ).fetchone()
 
     if not best_metric:
