@@ -37,26 +37,58 @@ from db_utils import extract_setfile_metadata, insert_job_and_task
 logging.basicConfig(level=logging.INFO)
 
 stop_flag = False
+#                                    +-------------------+
+#                                    |    STATUS_NEW     |
+#                                    +-------------------+
+#                                              |
+#                                              v
+#                                    +--------------------+
+#                                    |   STATUS_QUEUED    |   (queued by controller)
+#                                    +--------------------+
+#                                              |
+#                                              v
+#                                    +-----------------------------+
+#                                    | STATUS_WORKER_IN_PROGRESS   |  (worker picks up)
+#                                    +-----------------------------+
+#                                              |
+#                       +----------------------+---------------------+
+#                       |                                            |
+#                       v                                            v
+#          +-----------------------------+            +-----------------------------+
+#          | STATUS_WORKER_COMPLETED      |            | STATUS_WORKER_FAILED        |
+#          +-----------------------------+            +-----------------------------+
+#                       |                                            |
+#          +------------+------------+                    +----------+-----------+
+#          |                         |                    |                      |
+#          v                         v                    v                      v
+# +-------------------+   +------------------------+   +-------------------+   +-------------------+
+# |  All metrics      |   |  At least one metric   |   | Retry attempts    |   | Max attempts or   |
+# |  passed (success) |   |  passed (partial)      |   | remain            |   | no attempts left  |
+# +-------------------+   +------------------------+   +-------------------+   +-------------------+
+#         |                        |                         |                      |
+#         v                        v                         v                      v
+# +---------------------+   +--------------------------+   +------------------+   +-------------------------+
+# | STATUS_COMPLETED_   |   | STATUS_COMPLETED_PARTIAL |   | STATUS_RETRYING  |   | STATUS_FAILED           |
+# | SUCCESS             |   +--------------------------+   +------------------+   +-------------------------+
+# +---------------------+            |                                          (terminal)
+#          |                        (controller checks periodically)
+#          |                                 |
+#          |                                 v
+#          |                 [If not at fine-tune depth limit and no child exists:]
+#          |                                 |
+#          |                    +------------------------------+
+#          |                    |  Spawn fine-tune child task  |
+#          |                    +------------------------------+
+#          |                                 |
+#          |                                 v
+#          |                    +--------------------------+
+#          |                    |  STATUS_FINE_TUNING      |
+#          |                    +--------------------------+
+#          |                                 |
+#          |                    (same path as new task: queued, worker, etc.)
+#          +-----------------------------+---+-----------------------------------+
 
-import logging
-
-def handle_terminal_task(r, task):
-    """
-    Handles cleanup for tasks reaching terminal status.
-    - Deletes file_blob from Redis.
-    - No queue cleanup needed (worker already removes from queue).
-
-    Args:
-        r: Redis client instance.
-        task: Task object with attribute input_blob_key.
-    """
-    if hasattr(task, "input_blob_key") and task.input_blob_key:
-        try:
-            r.delete(task.input_blob_key)
-            logging.info(f"Deleted file_blob {task.input_blob_key} for completed/failed task {task.id}")
-        except Exception as e:
-            logging.warning(f"Failed to delete file_blob {task.input_blob_key} for task {task.id}: {e}")
-
+# --- Signal Handling for Graceful Shutdown ---
 def handle_stop_signal(sig, frame):
     global stop_flag
     logging.info("Received stop signal, will exit after this iteration.")
@@ -65,7 +97,12 @@ def handle_stop_signal(sig, frame):
 signal.signal(signal.SIGINT, handle_stop_signal)
 signal.signal(signal.SIGTERM, handle_stop_signal)
 
+# --- Utility Functions for Priority and Status Management ---
 def effective_priority(task, now=None):
+    """
+    Compute the effective priority of a task for queueing, including base priority,
+    retry boost, and aging bonus.
+    """
     now = now or datetime.utcnow()
     base = task.priority or 0
     retry_bump = 2 ** (task.attempt_count or 0) if task.status == STATUS_RETRYING else 0
@@ -73,29 +110,10 @@ def effective_priority(task, now=None):
     aging = config.AGING_FACTOR * age_minutes
     return base + retry_bump + aging
 
-def mark_task_failed(session, task, reason=None):
-    task.status = STATUS_FAILED
-    task.last_error = reason
-    session.commit()
-    update_job_status(session, task.job_id)
-    subject = f"Task Failed: {task.file_path or task.id}"
-    body = f"Task {task.id} marked as failed.\nReason: {reason or 'Unknown'}."
-    send_email(subject, body)
-    send_telegram(body)
-
-def mark_task_success(session, task):
-    task.status = STATUS_COMPLETED_SUCCESS
-    session.commit()
-    update_job_status(session, task.job_id)
-    logging.info(f"Task {task.id} marked as {STATUS_COMPLETED_SUCCESS}.")
-
-def mark_task_partial(session, task):
-    task.status = STATUS_COMPLETED_PARTIAL
-    session.commit()
-    update_job_status(session, task.job_id)
-    logging.info(f"Task {task.id} marked as {STATUS_COMPLETED_PARTIAL}.")
-
 def hybrid_priority(task, now=None):
+    """
+    Compute a hybrid priority, including special handling for retrying and fine-tune tasks.
+    """
     now = now or datetime.utcnow()
     base = task.priority or 10
     age_minutes = ((now - (task.updated_at or task.created_at)).total_seconds() / 60) if (task.updated_at or task.created_at) else 0
@@ -107,7 +125,55 @@ def hybrid_priority(task, now=None):
     else:
         return base + aging
 
+def handle_terminal_task(r, task):
+    """
+    Handles cleanup for tasks reaching terminal status.
+    - Deletes file_blob from Redis.
+    - No queue cleanup needed (worker already removes from queue).
+    """
+    if hasattr(task, "input_blob_key") and task.input_blob_key:
+        try:
+            r.delete(task.input_blob_key)
+            logging.info(f"Deleted file_blob {task.input_blob_key} for completed/failed task {task.id}")
+        except Exception as e:
+            logging.warning(f"Failed to delete file_blob {task.input_blob_key} for task {task.id}: {e}")
+
+def mark_task_failed(session, task, reason=None):
+    """
+    Mark a task as failed with optional reason and update job status.
+    """
+    task.status = STATUS_FAILED
+    task.last_error = reason
+    session.commit()
+    update_job_status(session, task.job_id)
+    subject = f"Task Failed: {task.file_path or task.id}"
+    body = f"Task {task.id} marked as failed.\nReason: {reason or 'Unknown'}."
+    send_email(subject, body)
+    send_telegram(body)
+
+def mark_task_success(session, task):
+    """
+    Mark a task as completed successfully and update job status.
+    """
+    task.status = STATUS_COMPLETED_SUCCESS
+    session.commit()
+    update_job_status(session, task.job_id)
+    logging.info(f"Task {task.id} marked as {STATUS_COMPLETED_SUCCESS}.")
+
+def mark_task_partial(session, task):
+    """
+    Mark a task as completed partial (some metrics pass) and update job status.
+    Fine-tune spawning is controller-managed and handled separately.
+    """
+    task.status = STATUS_COMPLETED_PARTIAL
+    session.commit()
+    update_job_status(session, task.job_id)
+    logging.info(f"Task {task.id} marked as {STATUS_COMPLETED_PARTIAL}.")
+
 def mark_task_retrying(session, task):
+    """
+    Mark a task as retrying (not yet reached max attempts), update job status.
+    """
     if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
         task.status = STATUS_RETRYING
         task.updated_at = datetime.utcnow()
@@ -115,7 +181,38 @@ def mark_task_retrying(session, task):
         update_job_status(session, task.job_id)
         logging.info(f"Task {task.id} marked as {STATUS_RETRYING}.")
 
+# --- Fine-tune Logic for Partial Tasks ---
+def handle_partial_tasks(session):
+    """
+    Scan for STATUS_COMPLETED_PARTIAL tasks and spawn fine-tune child if not already exists.
+    This is idempotent (safe to run repeatedly).
+    """
+    # Find all partial tasks that have not yet spawned a fine-tune child
+    partial_tasks = session.query(ControllerTask).filter(
+        ControllerTask.status == STATUS_COMPLETED_PARTIAL
+    ).all()
+    for task in partial_tasks:
+        # Check if fine-tune child already exists for this parent
+        exists = session.query(ControllerTask).filter_by(
+            parent_task_id=task.id, step_name='fine_tune'
+        ).count() > 0
+        # Only spawn fine-tune if eligible and not already spawned
+        if not exists and (task.fine_tune_depth or 0) < config.MAX_FINE_TUNE_DEPTH:
+            try:
+                spawn_fine_tune_task(session, task)
+                logging.info(f"Spawned fine-tune task for partial parent {task.id}")
+            except Exception as e:
+                logging.error(f"Could not spawn fine-tune task for {task.id}: {e}")
+
+# --- Main Controller Loop ---
 def main_loop():
+    """
+    Main controller loop:
+    - Watches for new tasks (from file drop).
+    - Handles post-worker status transitions and retry/fine-tune logic.
+    - Periodically checks partial tasks to spawn fine-tune children if needed.
+    - Queues eligible tasks to Redis for worker processing.
+    """
     r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=False)
     POLL_INTERVAL = 20  # seconds
 
@@ -126,6 +223,7 @@ def main_loop():
 
     while not stop_flag:
         now = time.time()
+        # --- Reload thresholds/config from DB if needed ---
         if now - last_reload > config.RELOAD_INTERVAL:
             thresholds_db = config.load_thresholds_from_db()
             config.TASK_MAX_ATTEMPTS = int(thresholds_db.get('MAX_ATTEMPTS', config.TASK_MAX_ATTEMPTS))
@@ -135,29 +233,27 @@ def main_loop():
             config.AGING_FACTOR = float(thresholds_db.get('AGING_FACTOR', config.AGING_FACTOR))
             last_reload = now
 
-        # --- WATCH_FOLDER LOGIC ---
+        # --- WATCH_FOLDER LOGIC: Create new tasks from .set files ---
         for file in Path(config.WATCH_FOLDER).glob("*.set"):
             try:
                 logging.debug(f"Processing file: {file}")
-                # NEW: Look for a .meta.json file with metadata (user_id, symbol, timeframe, ea_name, original_filename)
                 meta_path = str(file) + ".meta.json"
                 meta_data = None
                 user_id = config.USER_ID  # default fallback
 
+                # Try to load task metadata from .meta.json if present
                 if os.path.exists(meta_path):
-                    # Load metadata from .meta.json
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta_json = json.load(f)
-                    # Extract user_id and the rest of the fields
                     user_id = meta_json.get("user_id", config.USER_ID)
-                    # Only pass relevant fields to insert_job_and_task
                     meta_data = {k: meta_json[k] for k in ["symbol", "timeframe", "ea_name", "original_filename"] if k in meta_json}
                     logging.debug(f"Loaded metadata from {meta_path}: {meta_data} with user_id={user_id}")
                 else:
-                    # Fallback: extract from .set file itself (legacy)
+                    # Fallback: extract metadata from .set file (legacy)
                     meta_data = extract_setfile_metadata(str(file))
                     logging.debug(f"Metadata extracted from .set file: {meta_data}")
 
+                # Add job/task to DB if not exists and store file_blob
                 with get_db() as session:
                     job_id, task_id, is_new = insert_job_and_task(session, meta_data, str(file), user_id=user_id)
                     logging.debug(f"job_id={job_id}, task_id={task_id}, is_new={is_new}")
@@ -170,10 +266,9 @@ def main_loop():
                     task = session.query(ControllerTask).get(task_id)
                     logging.debug(f"Task fetched: {task}")
                     task.file_blob = file_blob
-                    # DO NOT set status to 'queued' here; keep as STATUS_NEW
                     session.commit()
                     print("DEBUG: file_blob committed to DB")
-                # Move both the .set file and its .meta.json (if exists) to processed folder
+                # Move processed files to processed folder
                 shutil.move(str(file), os.path.join(config.PROCESSED_FOLDER, file.name))
                 if os.path.exists(meta_path):
                     shutil.move(meta_path, os.path.join(config.PROCESSED_FOLDER, os.path.basename(meta_path)))
@@ -190,13 +285,14 @@ def main_loop():
                 send_telegram(body)
 
         # --- POST-WORKER STATUS HANDLING ---
+        # After worker completes a task, controller evaluates metrics and determines next step.
         try:
             with get_db() as session:
                 finished_tasks = session.query(ControllerTask).filter(
                     ControllerTask.status.in_([STATUS_WORKER_COMPLETED, STATUS_WORKER_FAILED])
                 ).all()
                 for task in finished_tasks:
-                    # If job already has a successful task, skip further transitions for this task.
+                    # If job already succeeded, skip further transitions for this task.
                     if job_has_success(session, task.job_id):
                         logging.info(
                             f"Job {task.job_id} already has a successful task. Skipping retry/fine-tune for task {task.id}.")
@@ -205,13 +301,11 @@ def main_loop():
                     terminal_status = False
 
                     if task.status == STATUS_WORKER_COMPLETED:
-                        # Fetch all metrics for this task (may be a list)
+                        # Evaluate metrics for this task
                         metrics_map = get_task_metric_scores(session, [task.id])
                         metrics = metrics_map.get(task.id, [])
                         if not isinstance(metrics, list):
                             metrics = [metrics]
-
-                        # Flag to track if any metric met success or partial criteria
                         success = False
                         partial = False
 
@@ -219,17 +313,15 @@ def main_loop():
                             score = m.get('score')
                             distance = m.get('distance')
                             logging.info(f"Task {task.id} metric: score={score}, distance={distance}")
-
-                            # Case 1: Success -- any metric meets BOTH thresholds
+                            # Success: any metric meets BOTH thresholds
                             if (score is not None and score >= config.SCORE_THRESHOLD) and \
                                (distance is not None and distance <= config.DISTANCE_THRESHOLD):
                                 success = True
                                 break
-                            # Case 2: Partial -- any metric meets EITHER threshold
+                            # Partial: any metric meets EITHER threshold
                             elif (score is not None and score >= config.SCORE_THRESHOLD) or \
                                  (distance is not None and distance <= config.DISTANCE_THRESHOLD):
                                 partial = True
-                                # Don't break; keep searching for a possible success metric
 
                         if success:
                             mark_task_success(session, task)
@@ -240,15 +332,9 @@ def main_loop():
                             terminal_status = True
                             logging.info(
                                 f"Task {task.id} marked as PARTIAL (at least one metric passed one threshold).")
-                            # Automatically spawn fine-tune if eligible
-                            if (task.fine_tune_depth or 0) < config.MAX_FINE_TUNE_DEPTH:
-                                try:
-                                    spawn_fine_tune_task(session, task)
-                                    logging.info(f"Spawned fine-tune task for parent task {task.id}")
-                                except Exception as e:
-                                    logging.error(f"Could not spawn fine-tune task for {task.id}: {e}")
+                            # DO NOT spawn fine-tune here; handled in periodic controller logic!
                         else:
-                            # Case 3: Fail/Retry -- no metrics passed
+                            # Retry logic: attempt again if attempts remain
                             if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
                                 mark_task_retrying(session, task)
                                 logging.info(f"Task {task.id} marked as RETRY: no metrics passed.")
@@ -261,7 +347,7 @@ def main_loop():
                         update_job_status(session, task.job_id)
 
                     elif task.status == STATUS_WORKER_FAILED:
-                        # Case 4: Worker failed, retry or fail
+                        # Worker failed: retry or mark as failed if out of attempts
                         if (task.attempt_count or 0) < (task.max_attempts or config.TASK_MAX_ATTEMPTS):
                             mark_task_retrying(session, task)
                             logging.info(f"Task {task.id} marked as RETRY after worker failure.")
@@ -272,14 +358,22 @@ def main_loop():
                         session.commit()
                         update_job_status(session, task.job_id)
 
-                    # If task reached a terminal status (success, partial, failed), clean up resources
                     if terminal_status:
                         handle_terminal_task(r, task)
 
         except Exception as ex:
             logging.error(f"Error in post-worker status handling: {ex}")
 
+        # --- PERIODIC PARTIAL TASK HANDLING (Fine-tune spawning by controller) ---
+        try:
+            with get_db() as session:
+                handle_partial_tasks(session)
+        except Exception as ex:
+            logging.error(f"Error in periodic partial task handling: {ex}")
+
         # --- CONTROLLER LOGIC (fine-tune, retry, queueing) ---
+        # Queue eligible tasks to Redis for worker processing.
+        # Only STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING are considered queueable.
         try:
             with get_db() as session:
                 now = datetime.utcnow()
@@ -294,6 +388,7 @@ def main_loop():
                     time.sleep(POLL_INTERVAL)
                     continue
 
+                # Score and sort tasks for queueing
                 task_ids = [t.id for t in tasks]
                 logging.debug(f"task_ids: {task_ids} (types: {[type(ti) for ti in task_ids]})")
                 metrics_map = get_task_metric_scores(session, task_ids)
@@ -309,13 +404,14 @@ def main_loop():
                     logging.debug(f"Task {t.id} scored: distance={t._distance}, score={t._score}, priority={t._priority}")
                     scored_tasks.append(t)
 
+                # Filter and sort queueable tasks
                 queueable_status = [STATUS_NEW, STATUS_RETRYING, STATUS_FINE_TUNING]
                 queueable = [
                     t for t in scored_tasks
                     if t.status in queueable_status
                     and (t.attempt_count or 0) < (t.max_attempts or config.TASK_MAX_ATTEMPTS)
                     and (t.fine_tune_depth or 0) <= config.MAX_FINE_TUNE_DEPTH
-                    and not job_has_success(session, t.job_id)  # <-- add this line
+                    and not job_has_success(session, t.job_id)
                 ]
 
                 logging.debug(f"Found {len(queueable)} queueable tasks")
@@ -333,6 +429,7 @@ def main_loop():
                 for task in batch:
                     logging.debug(f"Preparing to queue task id={task.id}, type={type(task.id)}, job_id={task.job_id}, type(job_id)={type(task.job_id)}")
                     old_status = task.status
+                    # Change task status to QUEUED and update timestamp
                     task.status = STATUS_QUEUED
                     task.updated_at = datetime.utcnow()
                     if old_status == STATUS_RETRYING:
