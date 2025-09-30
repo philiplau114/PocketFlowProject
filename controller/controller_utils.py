@@ -35,7 +35,7 @@ def spawn_fine_tune_task(session, parent_task):
     """
     Spawns a fine-tune child task for the given parent task.
     Uses the best test metric (lowest distance, highest score) from v_test_metrics_scored view.
-    Commits and returns new task and the file_blob (optional).
+    Returns new task and the file_blob (optional).
     """
     from db.db_models import ControllerTask, ControllerArtifact
     from sqlalchemy import and_, text
@@ -73,13 +73,11 @@ def spawn_fine_tune_task(session, parent_task):
         description=f"Fine-tune for parent task {parent_task.id}",
         attempt_count=0,
         max_attempts=parent_task.max_attempts,
-        # You may wish to add more fields as needed
     )
-    # Optionally copy file_blob or other relevant fields if needed
     fine_tune_task.file_blob = parent_task.file_blob
 
     session.add(fine_tune_task)
-    session.commit()
+    # Do NOT commit here; let the caller commit
     return fine_tune_task
 
 def queue_task_to_redis(r, task):

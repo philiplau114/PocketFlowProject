@@ -368,6 +368,7 @@ def main_loop():
         try:
             with get_db() as session:
                 handle_partial_tasks(session)
+                session.commit()  # <--- Add this line!
         except Exception as ex:
             logging.error(f"Error in periodic partial task handling: {ex}")
 
