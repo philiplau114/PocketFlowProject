@@ -51,11 +51,6 @@ elif ROLE == "worker":
 else:
     print("[config.py DEBUG] Not loading specific .env for role (ROLE not recognized)")
 
-# --- DEBUG: Print key env variables to confirm they are loaded ---
-print(f"[config.py DEBUG] SQLCIPHER_KEY: {os.getenv('SQLCIPHER_KEY')}")
-print(f"[config.py DEBUG] SQLALCHEMY_DATABASE_URL: {os.getenv('SQLALCHEMY_DATABASE_URL')}")
-print(f"[config.py DEBUG] UIPATH_MT4_LIB: {os.getenv('UIPATH_MT4_LIB')}")
-
 # Database
 SQLALCHEMY_DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URL')
 MYSQL_HOST = os.getenv('MYSQL_HOST')
