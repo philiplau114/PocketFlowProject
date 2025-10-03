@@ -12,6 +12,9 @@ from db_utils import extract_setfile_metadata
 import config
 import session_manager
 
+# --- SHARED RE-OPTIMIZE LOGIC ---
+from reoptimize_utils import reoptimize_by_metric  # Shared utility at project root
+
 # --- Status Constants ---
 from db.status_constants import (
     JOB_STATUS_NEW,
@@ -127,46 +130,6 @@ def load_details(job_id: int):
         details = pd.read_sql(query, conn, params=(int(job_id),))
     return details
 
-def reoptimize_by_metric(engine, metric_id, job_row, metric_row, session_user_id):
-    sql = text("""
-    SELECT file_blob, file_name
-    FROM controller_artifacts
-    WHERE link_type = 'test_metrics'
-      AND artifact_type = 'output_set'
-      AND link_id = :link_id
-    ORDER BY created_at DESC
-    LIMIT 1
-    """)
-    with engine.connect() as conn:
-        res = conn.execute(sql, {"link_id": int(metric_id)})
-        row = res.fetchone()
-        if not row:
-            raise Exception(f"No output_set artifact found for metric_id {metric_id}")
-        file_blob, file_name = row
-
-    base = os.path.splitext(file_name)[0]
-    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    unique_str = f"REOPT_{metric_id}_{timestamp}"
-    hash_str = hashlib.sha1(unique_str.encode()).hexdigest()[:4]
-    new_file_name = f"{base}_R{hash_str}.set"
-    save_path = os.path.join(config.WATCH_FOLDER, new_file_name)
-
-    with open(save_path, "wb") as f:
-        f.write(file_blob)
-
-    meta_data = {
-        "user_id": int(session_user_id),
-        "symbol": str(job_row['symbol']),
-        "timeframe": str(job_row['timeframe']),
-        "ea_name": str(job_row['ea_name']),
-        "original_filename": str(new_file_name),
-        "reoptimize_source_metric_id": int(metric_id),
-        "reoptimize_source_job_id": int(job_row['id'])
-    }
-    meta_path = save_path + ".meta.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta_data, f)
-
 def file_exists_in_active_jobs_or_tasks(engine, input_file_name):
     sql = """
     SELECT 
@@ -211,7 +174,17 @@ if st.session_state['is_reoptimizing']:
     with st.spinner("Re-optimization in progress... Please wait."):
         if st.session_state['reopt_args'] is not None:
             try:
-                reoptimize_by_metric(*st.session_state['reopt_args'])
+                # Direct call with explicit arguments, no unpacking
+                reopt_args = st.session_state['reopt_args']
+                reoptimize_by_metric(
+                    engine=engine,
+                    metric_id=reopt_args['metric_id'],
+                    job_row=reopt_args['job_row'],
+                    metric_row=reopt_args['metric_row'],
+                    user_id=reopt_args['user_id'],
+                    watch_folder=config.WATCH_FOLDER,
+                    prefix="R"
+                )
                 st.session_state['reopt_message'] = "Re-optimization complete! (see watch folder)"
             except Exception as e:
                 st.session_state['reopt_message'] = f"Failed to trigger re-optimization: {e}"
@@ -424,7 +397,13 @@ else:
                     "Re-optimize selected strategy",
                     disabled=not can_reoptimize
                 ):
-                    st.session_state['reopt_args'] = (engine, metric_id, selected_job_row, selected_metric_row, session_user_id)
+                    # Save explicit arguments as a dictionary for clarity/maintainability
+                    st.session_state['reopt_args'] = {
+                        "metric_id": metric_id,
+                        "job_row": selected_job_row,
+                        "metric_row": selected_metric_row,
+                        "user_id": session_user_id
+                    }
                     st.session_state['is_reoptimizing'] = True
                     st.rerun()
             elif not can_reoptimize:
