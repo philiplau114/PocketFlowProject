@@ -154,3 +154,27 @@ LOCK_RETRY_SLEEP = float(os.getenv('LOCK_RETRY_SLEEP', 1))
 # --- Redis Session ---
 SESSION_PREFIX = os.getenv('SESSION_PREFIX', 'session:')
 SESSION_TTL = int(os.getenv('SESSION_TTL', 3600))  # Default: 1 hour
+
+# Core configuration variables for pip value calculation for risk assessment
+TICKDATA_DIR = os.getenv('TICKDATA_DIR', 'C:/Users/Philip/Documents/GitHub/mt4_optimizer/TickData')
+ACCOUNT_CCY = os.getenv('ACCOUNT_CCY', 'USD')
+
+# Two-way lock files for batch-worker coordination
+LOCK_DIR = os.getenv('LOCK_DIR', os.path.join(PROJECT_ROOT, 'worker'))
+TICKDATA_LOCK_FILE = os.path.join(LOCK_DIR, os.getenv('TICKDATA_LOCK_FILE', 'tickdata.lock'))
+WORKER_PAUSED_LOCK_FILE = os.path.join(LOCK_DIR, os.getenv('WORKER_PAUSED_LOCK_FILE', 'worker_paused.lock'))
+LOCK_WAIT_TIMEOUT_SECONDS = int(os.getenv('LOCK_WAIT_TIMEOUT_SECONDS', 8 * 60 * 60))
+
+# CCY_PAIRS as a parsed Python list
+CCY_PAIRS = [x.strip() for x in os.getenv("CCY_PAIRS", "").split(',') if x.strip()]
+
+# Tick Data Manager path (string, from .env or fallback default)
+TICK_DATA_MANAGER_PATH = os.getenv("TICK_DATA_MANAGER_PATH", r'"c:\Program Files (x86)\eareview.net\Tick Data Suite\Tick Data Manager.exe"')
+
+# Export format (string, from .env or fallback default)
+EXPORT_FORMAT = os.getenv("EXPORT_FORMAT", r'C:\Users\Philip\Documents\GitHub\PocketFlowProject\portfolio_analysis\export_H1_bars.bcf')
+
+# Export directory (string, from .env or fallback default)
+EXPORT_DIR = os.getenv("EXPORT_DIR", r'C:\Users\Philip\Documents\GitHub\PocketFlowProject\portfolio_analysis\exported_bars')
+
+CORRELATION_LOOKBACK_DAYS = int(os.getenv('CORRELATION_LOOKBACK_DAYS', 365))

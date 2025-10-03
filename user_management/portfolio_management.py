@@ -406,7 +406,7 @@ if not portfolio_df.empty:
                             cum_results = np.cumsum(sampled_outcomes)
                             results.append(cum_results)
                         results = np.array(results)
-                        max_drawdown = np.max(np.maximum_accumulate(results, axis=1) - results, axis=1)
+                        max_drawdown = np.max(np.maximum.accumulate(results, axis=1) - results, axis=1)
                         ruin_prob = np.mean(np.min(results, axis=1) < -1000)
                         return {
                             "max_drawdown": float(np.median(max_drawdown)),

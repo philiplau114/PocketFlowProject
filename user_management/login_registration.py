@@ -38,11 +38,12 @@ with tab_login:
             # Create session in Redis
             session_data = {
                 "username": user.username,
+                "user_id": user.id,
                 "user_role": user.role,
                 "open_router_api_key": user.open_router_api_key,
                 "status": user.status
             }
-            create_session(user.username, session_data)
+            create_session(user.username, user.id, session_data)
             for k, v in session_data.items():
                 st.session_state[k] = v
             st.success("Login successful!")

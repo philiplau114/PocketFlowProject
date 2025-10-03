@@ -36,9 +36,10 @@ if not is_authenticated(st.session_state):
             from session_manager import create_session
             session_data = {
                 "username": username,
+                "user_id": user.id,
                 "user_role": "Admin"
             }
-            create_session(username, session_data)
+            create_session(username, user.id, session_data)
             for k, v in session_data.items():
                 st.session_state[k] = v
             st.success("Logged in as Admin.")

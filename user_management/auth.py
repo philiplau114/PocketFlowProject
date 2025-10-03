@@ -18,9 +18,10 @@ def login(db_session, username, password):
     # Store session in Redis using unified session manager
     session_data = {
         "username": username,
+        "user_id": user.id,
         "user_role": user.role
     }
-    create_session(username, session_data)
+    create_session(username, user.id, session_data)
     return username, None  # Return username as session key
 
 def logout(username):

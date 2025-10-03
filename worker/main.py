@@ -14,8 +14,8 @@ from config import (
     MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE,
     REDIS_HOST, REDIS_PORT, REDIS_MAIN_QUEUE, WORKER_ID,
     UIPATH_CLI, UIPATH_WORKFLOW, UIPATH_JOB_MAX_SECONDS, UIPATH_KILL_FILE, UIPATH_MT4_LIB, UIPATH_CONFIG,
-    OUTPUT_JSON_DIR, OUTPUT_JSON_POLL_INTERVAL, OUTPUT_JSON_WARNING_MODULUS
-)
+    OUTPUT_JSON_DIR, OUTPUT_JSON_POLL_INTERVAL, OUTPUT_JSON_WARNING_MODULUS,
+    LOCK_DIR, TICKDATA_LOCK_FILE, WORKER_PAUSED_LOCK_FILE)
 from db.status_constants import (
     STATUS_WORKER_IN_PROGRESS,
     STATUS_WORKER_COMPLETED,
@@ -32,6 +32,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
+def wait_if_batch_lock():
+    if os.path.exists(TICKDATA_LOCK_FILE):
+        # Acknowledge pause
+        open(WORKER_PAUSED_LOCK_FILE, 'w').close()
+        print("[Worker] Batch lock detected. Worker is paused.")
+        # Wait until batch releases the lock
+        while os.path.exists(TICKDATA_LOCK_FILE):
+            time.sleep(2)
+        # Remove paused lock and resume
+        if os.path.exists(WORKER_PAUSED_LOCK_FILE):
+            os.remove(WORKER_PAUSED_LOCK_FILE)
+        print("[Worker] Batch lock cleared. Worker resumes.")
+
 def notify_kill(task_id, reason, extra=None):
     subject = f"[Worker Kill] Task {task_id} killed due to {reason}"
     body = f"Task {task_id} killed.\nReason: {reason}\n"
@@ -46,6 +59,7 @@ def main():
     HEARTBEAT_INTERVAL = 300  # seconds (5 min)
 
     while True:
+        wait_if_batch_lock()
         try:
             logger.debug(f"Waiting for task from Redis main queue: {REDIS_MAIN_QUEUE}")
             # removed processing queue
