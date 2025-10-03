@@ -2,6 +2,7 @@ import sqlite3
 import pymysql
 import os
 import base64
+import re
 
 from sqlalchemy.orm import sessionmaker
 from config import (
@@ -34,6 +35,56 @@ def controller_db_session():
     finally:
         session.close()
         engine.dispose()
+
+def sync_setfile_parameters(ctrl_conn, controller_task_id):
+    """
+    Extract top-level setfile parameter-value pairs (no comma in parameter) for a controller_task_id,
+    and insert them into setfile_parameters table.
+    Follows the db_sync.py convention: uses positional access, does NOT commit or close the connection.
+    """
+    query = """
+    SELECT 
+        tm.id AS test_metrics_id,
+        ca.id AS controller_artifact_id,
+        ca.file_blob
+    FROM
+        controller_artifacts ca,
+        test_metrics tm
+    WHERE
+        tm.id = ca.link_id
+        AND ca.artifact_type = 'output_set'
+        AND ca.link_type = 'test_metrics'
+        AND tm.controller_task_id = %s
+    """
+    cursor = ctrl_conn.cursor()
+    cursor.execute(query, (controller_task_id,))
+    rows = cursor.fetchall()
+
+    insert_sql = """
+    INSERT INTO setfile_parameters
+        (controller_artifact_id, test_metrics_id, parameter, value)
+    VALUES
+        (%s, %s, %s, %s)
+    """
+
+    total_inserted = 0
+    for row in rows:
+        test_metrics_id = row[0]
+        controller_artifact_id = row[1]
+        file_blob = row[2]
+        # Decode if bytes (BLOB)
+        content = file_blob.decode('utf-8') if isinstance(file_blob, bytes) else file_blob
+
+        for line in content.splitlines():
+            # Match "key=value", where key does NOT contain a comma
+            m = re.match(r'^\s*([^=,\s][^=,]*)\s*=\s*(.+?)\s*$', line)
+            if m:
+                param, value = m.group(1), m.group(2)
+                cursor.execute(insert_sql, (controller_artifact_id, test_metrics_id, param, value))
+                total_inserted += 1
+
+    # Do NOT commit or close the cursor/connection here, per db_sync.py pattern
+    print(f"[sync_setfile_parameters] Inserted {total_inserted} top-level parameter records for controller_task_id {controller_task_id}")
 
 def link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id):
     cursor = ctrl_conn.cursor()
@@ -471,6 +522,7 @@ def sync_artifacts(worker_job_id, ctrl_conn):
             #with controller_db_session() as session:
             #    link_artifacts_to_test_metrics_for_task(session, controller_task_id)
             link_artifacts_to_test_metrics_for_task(ctrl_conn, controller_task_id)
+            sync_setfile_parameters(ctrl_conn, controller_task_id)
             #print(f"[DEBUG] Linked artifacts to test_metrics for controller_task_id={controller_task_id}")
     except Exception as e:
         print(f"[ERROR] Error during artifact sync: {e}")

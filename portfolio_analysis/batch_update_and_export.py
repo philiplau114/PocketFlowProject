@@ -11,18 +11,26 @@ def get_date_range():
     start = today - timedelta(days=config.CORRELATION_LOOKBACK_DAYS)
     return start.strftime('%Y.%m.%d'), today.strftime('%Y.%m.%d')
 
+def quote_path(path):
+    # Add quotes if not already present (prevents double quoting)
+    if not (path.startswith('"') and path.endswith('"')):
+        return f'"{path}"'
+    return path
+
 def update_tick_data():
-    cmd = (
-        f'{config.TICK_DATA_MANAGER_PATH} /update:Dukascopy:{",".join(config.CCY_PAIRS)}'
-    )
+    tick_data_manager = quote_path(config.TICK_DATA_MANAGER_PATH)
+    pairs = ",".join(config.CCY_PAIRS)
+    cmd = f'{tick_data_manager} /update:Dukascopy:{pairs}'
     print(f"[batch_update_and_export] Updating tick data:\n{cmd}")
     os.system(cmd)
 
 def export_tick_data(start_date, end_date):
     if not os.path.exists(config.EXPORT_DIR):
         os.makedirs(config.EXPORT_DIR)
+    tick_data_manager = quote_path(config.TICK_DATA_MANAGER_PATH)
+    pairs = ",".join(config.CCY_PAIRS)
     cmd = (
-        f'{config.TICK_DATA_MANAGER_PATH} /export:Dukascopy:{",".join(config.CCY_PAIRS)}:{start_date}-{end_date} '
+        f'{tick_data_manager} /export:Dukascopy:{pairs}:{start_date}-{end_date} '
         f'/eformat:{config.EXPORT_FORMAT} /output:{config.EXPORT_DIR}'
     )
     print(f"[batch_update_and_export] Exporting tick data:\n{cmd}")
