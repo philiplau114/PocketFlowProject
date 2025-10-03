@@ -168,11 +168,11 @@ def auto_reoptimize_when_idle(engine, watch_folder, user_id):
             FROM controller_jobs jobs
             JOIN controller_tasks tasks ON tasks.job_id = jobs.id
             JOIN v_test_metrics_scored metrics ON metrics.controller_task_id = tasks.id
-            WHERE jobs.status = %s
+            WHERE jobs.status = :status
             ORDER BY jobs.updated_at DESC, jobs.id DESC
             LIMIT 1
             """
-            row = conn.execute(sql, (status,)).fetchone()
+            row = conn.execute(sqlalchemy.text(sql), {"status": status}).fetchone()
             if not row:
                 continue
 
