@@ -4,14 +4,36 @@ from datetime import datetime
 import json
 import sqlalchemy
 
+def log_reoptimize_history(engine, job_id, metric_id, trigger_type, user_id, status_at_trigger, output_set_file, meta=None):
+    sql = """
+        INSERT INTO reoptimize_history
+        (job_id, metric_id, triggered_at, trigger_type, user_id, status_at_trigger, output_set_file, meta)
+        VALUES (:job_id, :metric_id, :triggered_at, :trigger_type, :user_id, :status_at_trigger, :output_set_file, :meta)
+    """
+    with engine.connect() as conn:
+        conn.execute(
+            sqlalchemy.text(sql),
+            {
+                'job_id': int(job_id),
+                'metric_id': int(metric_id),
+                'triggered_at': datetime.utcnow(),
+                'trigger_type': trigger_type,  # "manual" or "auto"
+                'user_id': int(user_id),
+                'status_at_trigger': status_at_trigger,
+                'output_set_file': output_set_file,
+                'meta': json.dumps(meta) if meta else None
+            }
+        )
 def get_output_set_artifact(engine, metric_id):
     sql = """
-    SELECT file_blob, file_name
-    FROM controller_artifacts
-    WHERE link_type = 'test_metrics'
-      AND artifact_type = 'output_set'
-      AND link_id = :link_id
-    ORDER BY created_at DESC
+    SELECT a.file_blob, a.file_name, j.status
+    FROM controller_artifacts a, controller_tasks t, controller_jobs j 
+    WHERE a.task_id = t.id
+      AND j.id = t.job_id
+      AND a.link_type = 'test_metrics'
+      AND a.artifact_type = 'output_set'
+      AND a.link_id = :link_id
+    ORDER BY a.created_at DESC
     LIMIT 1
     """
     with engine.connect() as conn:
@@ -19,7 +41,7 @@ def get_output_set_artifact(engine, metric_id):
         row = res.fetchone()
         if not row:
             raise Exception(f"No output_set artifact found for metric_id {metric_id}")
-        return row[0], row[1]
+        return row[0], row[1], row[2]  # file_blob, file_name, job_status
 
 def generate_short_suffix(metric_id):
     # Uses the last 4 hex chars of a hash of metric_id and timestamp
@@ -29,8 +51,8 @@ def generate_short_suffix(metric_id):
     return hash_str
 
 def reoptimize_by_metric(engine, metric_id, job_row, metric_row, user_id, *, meta_extras=None, prefix="R", watch_folder=None):
-    # Get artifact
-    file_blob, file_name = get_output_set_artifact(engine, metric_id)
+    # Get artifact and job status for this metric
+    file_blob, file_name, job_status = get_output_set_artifact(engine, metric_id)
     base = os.path.splitext(file_name)[0]
     suffix = generate_short_suffix(metric_id)
     new_file_name = f"{base}_{prefix}{suffix}.set"
@@ -53,4 +75,23 @@ def reoptimize_by_metric(engine, metric_id, job_row, metric_row, user_id, *, met
     meta_path = save_path + ".meta.json"
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta_data, f)
+
+    # Determine trigger_type from prefix
+    trigger_type = "auto" if prefix == "A" else "manual"
+
+    # status_at_trigger is the job_status we just fetched
+    status_at_trigger = job_status
+
+    # Log to reoptimize_history
+    log_reoptimize_history(
+        engine=engine,
+        job_id=job_row['id'],
+        metric_id=metric_id,
+        trigger_type=trigger_type,
+        user_id=user_id,
+        status_at_trigger=status_at_trigger,
+        output_set_file=new_file_name,
+        meta=meta_data
+    )
+
     return save_path

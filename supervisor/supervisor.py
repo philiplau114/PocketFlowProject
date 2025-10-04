@@ -145,8 +145,24 @@ def reconcile_db_redis(session, r):
 def auto_reoptimize_when_idle(engine, watch_folder, user_id):
     """
     Performs auto-reoptimize if the queue is empty.
-    Tries jobs in order: failed, completed_partial, completed_success.
-    Only processes one job per call. Marks meta with auto_reoptimize flag.
+    Auto-Reoptimize Summary:
+     - Prioritizes job status in the following order:
+       1. JOB_STATUS_FAILED
+       2. JOB_STATUS_COMPLETED_PARTIAL
+       3. JOB_STATUS_COMPLETED_SUCCESS
+
+     - Uses the view `v_test_metrics_best_per_symbol` to select the best metric for each job/symbol.
+       (Ensure this view is correctly defined to truly return the best metric per job/symbol.)
+
+     - Only selects jobs that have NOT been reoptimized yet:
+       SQL: AND NOT EXISTS (SELECT 1 FROM reoptimize_history WHERE job_id = jobs.id)
+
+     - Orders candidates by:
+       ORDER BY normalized_total_distance_to_good ASC, weighted_score DESC
+       (This picks the metric closest to success.)
+
+     - LIMIT 1:
+       Only one job/metric is processed per idle period.
     """
     # Use imported job status constants
     reopt_statuses = [
@@ -165,11 +181,13 @@ def auto_reoptimize_when_idle(engine, watch_folder, user_id):
                 jobs.timeframe,
                 metrics.id AS metric_id,
                 metrics.set_file_name
-            FROM controller_jobs jobs
-            JOIN controller_tasks tasks ON tasks.job_id = jobs.id
-            JOIN v_test_metrics_scored metrics ON metrics.controller_task_id = tasks.id
-            WHERE jobs.status = :status
-            ORDER BY jobs.updated_at DESC, jobs.id DESC
+            FROM controller_jobs jobs, controller_tasks tasks, v_test_metrics_best_per_symbol metrics
+            where tasks.job_id = jobs.id
+              and metrics.controller_task_id = tasks.id
+              and metrics.id is not null
+              and jobs.status = :status
+              and not exists (select 1 from reoptimize_history where job_id = jobs.id)
+            ORDER BY normalized_total_distance_to_good asc, weighted_score desc
             LIMIT 1
             """
             row = conn.execute(sqlalchemy.text(sql), {"status": status}).fetchone()
