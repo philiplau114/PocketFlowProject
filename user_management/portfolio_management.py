@@ -137,6 +137,7 @@ portfolio = portfolio_options[portfolio_choice]
 
 st.write(f"**Portfolio:** {portfolio.portfolio_name}")
 st.write(f"**Description:** {portfolio.description}")
+st.write(f"**Initial Deposit:** {portfolio.initial_deposit} {config.ACCOUNT_CCY}")
 
 # --- Strategies in Portfolio & Remove ---
 portfolio_df = get_portfolio_strategies(session, portfolio.id)

@@ -68,7 +68,7 @@ def load_jobs(user_name=None, status=None):
             controller_jobs.symbol,
             controller_jobs.timeframe,
             controller_jobs.ea_name,
-            controller_jobs.original_file,
+            SUBSTRING_INDEX(controller_jobs.original_file, '\\\\', -1) AS original_file,
             controller_jobs.status,
             controller_jobs.created_at,
             task_summary.number_of_attempt,

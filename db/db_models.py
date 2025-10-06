@@ -268,6 +268,8 @@ class Portfolio(Base):
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     portfolio_name = Column(String(255))
     description = Column(Text)
+    initial_deposit = Column(Float, nullable=False, default=0)  # NEW FIELD
+    assessment = Column(Text)        # NEW FIELD
     created_at = Column(DateTime, default=datetime.utcnow)
     meta_json = Column(Text)
 

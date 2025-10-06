@@ -5,25 +5,30 @@ import json
 import sqlalchemy
 
 def log_reoptimize_history(engine, job_id, metric_id, trigger_type, user_id, status_at_trigger, output_set_file, meta=None):
+    import logging
     sql = """
         INSERT INTO reoptimize_history
         (job_id, metric_id, triggered_at, trigger_type, user_id, status_at_trigger, output_set_file, meta)
         VALUES (:job_id, :metric_id, :triggered_at, :trigger_type, :user_id, :status_at_trigger, :output_set_file, :meta)
     """
-    with engine.connect() as conn:
-        conn.execute(
-            sqlalchemy.text(sql),
-            {
-                'job_id': int(job_id),
-                'metric_id': int(metric_id),
-                'triggered_at': datetime.utcnow(),
-                'trigger_type': trigger_type,  # "manual" or "auto"
-                'user_id': int(user_id),
-                'status_at_trigger': status_at_trigger,
-                'output_set_file': output_set_file,
-                'meta': json.dumps(meta) if meta else None
-            }
-        )
+    try:
+        with engine.begin() as conn:  # this context manager will commit or rollback automatically
+            conn.execute(
+                sqlalchemy.text(sql),
+                {
+                    'job_id': int(job_id),
+                    'metric_id': int(metric_id),
+                    'triggered_at': datetime.utcnow(),
+                    'trigger_type': trigger_type,  # "manual" or "auto"
+                    'user_id': int(user_id),
+                    'status_at_trigger': status_at_trigger,
+                    'output_set_file': output_set_file,
+                    'meta': json.dumps(meta) if meta else None
+                }
+            )
+    except Exception as e:
+        logging.error(f"[log_reoptimize_history] Failed to log reoptimize history: {e}")
+        raise
 def get_output_set_artifact(engine, metric_id):
     sql = """
     SELECT a.file_blob, a.file_name, j.status
