@@ -174,20 +174,27 @@ def auto_reoptimize_when_idle(engine, watch_folder, user_id):
     with engine.connect() as conn:
         for status in reopt_statuses:
             sql = """
-            SELECT
+            SELECT 
                 jobs.id AS job_id,
                 jobs.ea_name,
                 jobs.symbol,
                 jobs.timeframe,
                 metrics.id AS metric_id,
-                metrics.set_file_name
-            FROM controller_jobs jobs, controller_tasks tasks, v_test_metrics_best_per_symbol metrics
-            where tasks.job_id = jobs.id
-              and metrics.controller_task_id = tasks.id
-              and metrics.id is not null
-              and jobs.status = :status
-              and not exists (select 1 from reoptimize_history where job_id = jobs.id)
-            ORDER BY normalized_total_distance_to_good asc, weighted_score desc
+                metrics.set_file_name,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM reoptimize_history repot
+                    JOIN controller_jobs cj ON repot.job_id = cj.id
+                    WHERE cj.symbol = jobs.symbol
+                ), 0) AS repot_sybmol_count
+            FROM
+                controller_jobs jobs
+            JOIN controller_tasks tasks ON tasks.job_id = jobs.id
+            JOIN v_test_metrics_best_per_symbol metrics ON metrics.controller_task_id = tasks.id
+            WHERE
+                metrics.id IS NOT NULL
+                AND jobs.status = :status
+            ORDER BY repot_sybmol_count ASC, normalized_total_distance_to_good ASC, weighted_score DESC
             LIMIT 1
             """
             row = conn.execute(sqlalchemy.text(sql), {"status": status}).fetchone()
